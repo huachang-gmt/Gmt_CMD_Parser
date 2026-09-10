@@ -1110,3 +1110,728 @@ Server → Client    ✓
 ```
 ![RoadMap](images/CM5命令解析連接圖.png)
 ---
+
+可以。這次我會完整保留今天的技術進度與架構，但全部改成**繁體中文**，方便你直接放進 GitHub `README.md`。
+
+# Gmt_CMD_Parser
+
+`Gmt_CMD_Parser` 是 GMT 運動控制系統中，部署於 Raspberry Pi CM5 的命令處理程式。
+
+目前系統的整體架構如下：
+
+```text
+End User TCP Client
+        │
+        │ TCP Command
+        ▼
+┌──────────────────────┐
+│     CM5 TCP Server   │
+│                      │
+│    Command Parser    │
+└──────────┬───────────┘
+           │
+           │ VALID Command
+           ▼
+      USB CDC Transport
+           │
+           ▼
+       STM32H755
+           │
+           ▼
+     SPI1 / EtherCAT
+           │
+           ▼
+       Motion Drivers
+```
+
+Command Parser 被設計成獨立模組，位於 TCP Server 與 USB Transport 之間。
+
+---
+# [2026-09-10] 更新狀態
+
+# 1. 目前專案狀態
+
+目前已完成：
+
+* CM5 TCP Server 基礎架構。
+* Command Parser 獨立模組。
+* 基本命令的格式驗證。
+* 部分帶參數命令的 Regex 格式驗證。
+* 建立獨立的 Parser 測試程式。
+* 建立獨立的帶參數命令測試程式。
+* 基本命令測試：**16/16 PASS**。
+* 帶參數命令測試：**16/16 PASS**。
+
+目前 Parser 測試屬於**開發階段的暫時性驗證測試**。
+
+由於目前使用的命令文件中，仍有部分命令格式、參數定義及 Regex 規則需要進一步釐清，因此目前的 Regex **尚不能視為最終正式規格**。
+
+後續會依照命令文件確認後的結果，持續修改與驗證 Parser。
+
+---
+
+# 2. 系統命令處理架構
+
+Command Parser 與 TCP Server 分離設計。
+
+目前預期的命令處理流程：
+
+```text
+End User TCP Client
+        │
+        │ ASCII Command
+        ▼
+┌──────────────────┐
+│    TCP Server    │
+└────────┬─────────┘
+         │
+         │ Command String
+         ▼
+┌──────────────────┐
+│ Command Parser   │
+└────────┬─────────┘
+         │
+     ┌───┴────┐
+     │        │
+     ▼        ▼
+   VALID    INVALID
+     │        │
+     ▼        ▼
+   USB      TCP Error
+Transport   Response
+     │
+     ▼
+ STM32H755
+```
+
+### TCP Server
+
+TCP Server 負責：
+
+* 接受 TCP Client 連線。
+* 接收 TCP Command。
+* 將 Command 傳給 Command Parser。
+* 根據 Parser 結果回覆 TCP Client。
+* VALID 的 Command 才繼續送往 USB Transport。
+
+TCP Server **不負責 Command-specific 的格式驗證**。
+
+---
+
+### Command Parser
+
+Command Parser 負責：
+
+* 辨識 Command。
+* 從 Command Array 中找到對應的 Command。
+* 取得該 Command 的 Regex Rule。
+* 驗證 Command 及其參數格式。
+* 回傳 `VALID` 或 `INVALID`。
+* 發生錯誤時提供錯誤訊息。
+
+Command Parser **不負責執行命令**。
+
+它不直接：
+
+* 控制 STM32。
+* 控制 EtherCAT。
+* 控制運動軸。
+* 執行運動演算法。
+* 傳送 USB 封包。
+
+---
+
+### USB Transport
+
+USB Transport 只負責：
+
+```text
+VALID Command
+      │
+      ▼
+USB CDC
+      │
+      ▼
+STM32H755
+```
+
+USB Transport **不負責 Command Parser 的工作**。
+
+---
+
+# 3. Command Parser 設計方式
+
+Command Parser 採用：
+
+**Command Array / Command Table + Regular Expression（Regex）**
+
+的設計方式。
+
+基本概念：
+
+```text
+收到 Command
+      │
+      ▼
+Command Array
+      │
+      ▼
+尋找 Command
+      │
+      ▼
+對應 Regex Rule
+      │
+      ▼
+regex_match()
+      │
+   ┌──┴──┐
+   ▼     ▼
+ VALID INVALID
+```
+
+每個 Command 可以在 Command Array 中指定自己的 Regex Rule。
+
+例如：
+
+```cpp
+{"SAH", REGEX_SAH},
+```
+
+對應：
+
+```cpp
+constexpr const char* REGEX_SAH =
+    R"(^\s*(A|M[0-9]{2})(\s+(A|M[0-9]{2})){2}\s*$)";
+```
+
+如果某個 Command 的參數規則尚未建立，可以暫時使用：
+
+```cpp
+{"COMMAND", nullptr},
+```
+
+此時 Parser 會回傳：
+
+```text
+Parameter rule not implemented
+```
+
+這可以讓 Command 先加入 Command Array，而不必在 Regex 尚未確認時自行猜測命令格式。
+
+---
+
+# 4. Parser 模組
+
+Command Parser 是獨立模組，不與 TCP Server 的解析邏輯混合。
+
+目前主要檔案：
+
+```text
+include/
+└── command_parser.h
+
+src/
+├── command_parser.cpp
+├── main.cpp
+├── tcp_server.cpp
+├── parser_test.cpp
+└── parser_parameter_test.cpp
+```
+
+正式程式：
+
+```text
+Gmt_CMD_Parser
+```
+
+使用：
+
+```text
+main.cpp
+tcp_server.cpp
+command_parser.cpp
+```
+
+Parser 測試則使用獨立 executable，不會把測試程式混入正式 TCP Server。
+
+---
+
+# 5. 基本 Command 測試：parser_test
+
+測試程式：
+
+```text
+src/parser_test.cpp
+```
+
+CMake Target：
+
+```text
+parser_test
+```
+
+這個測試程式專門測試**不帶參數的基本 Command 與 Query Command**。
+
+目前測試內容包括：
+
+```text
+STP
+SVO
+SVF
+CAL
+DSC
+
+MOV?
+POS?
+PMS?
+SPI?
+FRS?
+BKN?
+```
+
+同時也測試一些應該判定為 INVALID 的輸入：
+
+```text
+STP 123
+SVO ABC
+MOV? 123
+UNKNOWN
+空字串
+```
+
+目前測試結果：
+
+```text
+[RESULT] 16/16 tests passed.
+```
+
+`parser_test.cpp` 會保留，作為基本 Parser 的 Regression Test。
+
+---
+
+# 6. 帶參數 Command 測試：parser_parameter_test
+
+為了避免把帶參數測試混入 `parser_test.cpp`，另外建立：
+
+```text
+src/parser_parameter_test.cpp
+```
+
+CMake Target：
+
+```text
+parser_parameter_test
+```
+
+這個測試程式專門驗證文件中**明確提供 Example 的帶參數命令**。
+
+目前測試的 Example 全部直接採用命令文件中的內容，不自行創造額外的測試格式。
+
+目前測試：
+
+```text
+INS 1
+
+SAH M01 M02 M03
+
+SHC M01 2 17 400000 40000 0 128
+
+SHC? M01
+
+VLS 0.15
+
+MOV R 2000 2000 1000 0 0.5 1
+
+MRV R 2000 2000 1000 0 0.5 1
+
+MSV M02 2000
+
+MSR M06 1
+
+MPV M01 M03 1200.0 -35.5
+
+MPR M01 M03 1200.0 -35.5
+
+SPI R U 10 5 2
+
+DFRS ScanRoutine01
+
+FLM M10 0.2 V 0.01 TH 255
+
+FLM M08 2 V 0.2
+
+BKN 0.015
+```
+
+這些 Example 的預期結果全部為：
+
+```text
+VALID
+```
+
+目前測試結果：
+
+```text
+[RESULT] 16/16 tests passed.
+```
+
+---
+
+# 7. 本次 Parser Regex 驗證過程
+
+本次測試實際找出了目前 Parser 中的問題。
+
+例如原本 `SAH` 的 Regex：
+
+```cpp
+constexpr const char* REGEX_SAH =
+    R"(^\s*(A|M[0-9]{2})\s*$)";
+```
+
+只能接受單一參數。
+
+但是命令文件提供的 Example 是：
+
+```text
+SAH M01 M02 M03
+```
+
+因此測試結果為：
+
+```text
+INVALID
+```
+
+經過確認文件 Example 後，將 Regex 修改為可以符合該 Example 的格式。
+
+修改後：
+
+```text
+SAH M01 M02 M03
+        ↓
+      VALID
+```
+
+---
+
+另外，部分命令原本在 Command Array 中為：
+
+```cpp
+{"MOV", nullptr},
+{"MRV", nullptr},
+{"MSV", nullptr},
+{"MSR", nullptr},
+{"MPV", nullptr},
+{"MPR", nullptr},
+{"DFRS", nullptr},
+{"FLM", nullptr},
+```
+
+因此測試時會得到：
+
+```text
+Parameter rule not implemented
+```
+
+本次依照文件中提供的 Example，建立對應的 Regex Rule。
+
+完成後：
+
+```text
+MOV   → VALID
+MRV   → VALID
+MSV   → VALID
+MSR   → VALID
+MPV   → VALID
+MPR   → VALID
+DFRS  → VALID
+FLM   → VALID
+```
+
+最終帶參數測試：
+
+```text
+16/16 PASS
+```
+
+---
+
+# 8. 目前測試架構
+
+目前 CMake 中共有三個 executable：
+
+```text
+Gmt_CMD_Parser
+    ├── main.cpp
+    ├── tcp_server.cpp
+    └── command_parser.cpp
+```
+
+```text
+parser_test
+    ├── parser_test.cpp
+    └── command_parser.cpp
+```
+
+```text
+parser_parameter_test
+    ├── parser_parameter_test.cpp
+    └── command_parser.cpp
+```
+
+這三個程式的用途不同。
+
+### 正式程式
+
+```text
+Gmt_CMD_Parser
+```
+
+用於實際 TCP Server 系統。
+
+### 基本 Parser 測試
+
+```text
+parser_test
+```
+
+專門驗證基本 Command / Query。
+
+### 帶參數 Parser 測試
+
+```text
+parser_parameter_test
+```
+
+專門驗證命令文件中已提供 Example 的帶參數 Command。
+
+---
+
+# 9. 編譯與測試
+
+進入專案：
+
+```bash
+cd ~/Gmt_CMD_Parser
+```
+
+重新建立 Build：
+
+```bash
+rm -rf build
+mkdir build
+cd build
+cmake ..
+make -j$(nproc)
+```
+
+執行基本 Parser 測試：
+
+```bash
+./parser_test
+```
+
+目前結果：
+
+```text
+[RESULT] 16/16 tests passed.
+```
+
+執行帶參數 Parser 測試：
+
+```bash
+./parser_parameter_test
+```
+
+目前結果：
+
+```text
+[RESULT] 16/16 tests passed.
+```
+
+---
+
+# 10. 目前狀態：暫時性測試
+
+**重要：目前 Regex 並不是最終正式版本。**
+
+目前的測試目的，是先確認：
+
+1. Command Array 的設計可以正常工作。
+2. Parser 可以正確找到 Command。
+3. Regex 可以驗證 Command 格式。
+4. VALID / INVALID 的處理流程正常。
+5. 文件中已提供的 Example 可以被目前 Parser 接受。
+6. Parser 可以獨立於 TCP Server 進行測試。
+
+目前命令文件中仍存在一些需要進一步釐清的項目，例如：
+
+* 部分 Command 的完整參數規則。
+* 部分參數的合法範圍。
+* 部分 Command 是否存在其他合法格式。
+* Regex 應該接受的精確輸入格式。
+
+因此目前的 Regex 應視為：
+
+```text
+開發階段暫時規則
+```
+
+而不是：
+
+```text
+最終正式 Command Specification
+```
+
+當命令文件確認完成後，Parser 的 Regex 會再依照正式規格進行修改。
+
+---
+
+# 11. 測試原則
+
+目前 Parser 開發遵循以下原則：
+
+1. Command Parser 與 TCP Server 分離。
+2. USB Transport 不負責 Command Parsing。
+3. 使用 Command Array / Command Table 管理 Command。
+4. 使用 Regex 驗證 Command 參數格式。
+5. 不自行猜測尚未確認的 Command 格式。
+6. 帶參數測試只使用命令文件中明確提供的 Example。
+7. 基本 Command 與帶參數 Command 使用不同測試程式。
+8. `parser_test.cpp` 保留作為基本 Parser Regression Test。
+9. `parser_parameter_test.cpp` 用於文件 Example 的參數驗證。
+10. 每次修改 Parser 後進行獨立編譯與測試。
+11. 命令文件釐清後，再更新對應 Regex 與測試案例。
+
+---
+
+# 12. 目前 Checkpoint
+
+```text
+Gmt_CMD_Parser
+│
+├── CM5 TCP Server 基礎架構
+│       ✅
+│
+├── Command Parser 獨立模組
+│       ✅
+│
+├── Command Array / Regex 設計
+│       ✅
+│
+├── parser_test.cpp
+│       ✅ 16/16 PASS
+│
+├── parser_parameter_test.cpp
+│       ✅ 16/16 PASS
+│
+├── 文件 Example 驗證
+│       ✅ 目前提供的 Example 全部 PASS
+│
+├── 命令文件最終規格
+│       ⏳ 尚需釐清
+│
+└── Parser 最終 Regex
+        ⏳ 持續修改
+```
+
+此版本為目前 `Gmt_CMD_Parser` 的 **Command Parser 開發階段 Checkpoint**。
+
+後續將依照命令文件的進一步確認結果，持續完善 Command Parser。
+
+這版比較適合你現在的 GitHub checkpoint：**不只記錄「16/16 通過」，也把今天為什麼要建立兩個測試程式、Parser 為什麼採用 Command Array + Regex，以及目前為什麼不能把 Regex 當成最終規格，都留下來了。**
+
+# 測試結果
+
+- 命令不帶參數
+```text
+herman@RPiCM5:~/Gmt_CMD_Parser/build $ ./parser_test
+[PASS] "STP" -> VALID
+[PASS] "SVO" -> VALID
+[PASS] "SVF" -> VALID
+[PASS] "CAL" -> VALID
+[PASS] "DSC" -> VALID
+[PASS] "MOV?" -> VALID
+[PASS] "POS?" -> VALID
+[PASS] "PMS?" -> VALID
+[PASS] "SPI?" -> VALID
+[PASS] "FRS?" -> VALID
+[PASS] "BKN?" -> VALID
+[PASS] "STP 123" -> INVALID
+[PASS] "SVO ABC" -> INVALID
+[PASS] "MOV? 123" -> INVALID
+[PASS] "UNKNOWN" -> INVALID
+[PASS] "" -> INVALID
+
+[RESULT] 16/16 tests passed.
+
+```
+- 命令帶參數
+以下我貼給你在文件上的命令帶有 example者，如果 parser 正確，這些帶參數的命令都會返回有效的訊息，如果出現Invalid，那就表示Regular expression 有錯誤。
+```text
+Example: INS 1
+Example: SAH M01 M02 M03
+Example: SHC M01 2 17 400000 40000 0 128
+Example: SHC? M01
+Example: VLS 0.15
+Example: MOV R 2000 2000 1000 0 0.5 1
+Example: MRV R 2000 2000 1000 0 0.5 1
+Example: MSV M02 2000
+Example: MSR M06 1
+Example: MPV M01 M03 1200.0 -35.5
+Example: MPR M01 M03 1200.0 -35.5
+Example: SPI R U 10 5 2
+Example: DFRS ScanRoutine01
+Example: FLM M10 0.2 V 0.01 TH 255
+Example: FLM M08 2 V 0.2
+Example: BKN 0.015
+```
+
+* 一開始發生 正則表示式 錯誤的情況
+
+```text
+herman@RPiCM5:~/Gmt_CMD_Parser/build $ ./parser_parameter_test
+[PASS] "INS 1" -> VALID
+[FAIL] "SAH M01 M02 M03" -> INVALID  ERROR: Invalid parameters
+[PASS] "SHC M01 2 17 400000 40000 0 128" -> VALID
+[PASS] "SHC? M01" -> VALID
+[PASS] "VLS 0.15" -> VALID
+[FAIL] "MOV R 2000 2000 1000 0 0.5 1" -> INVALID  ERROR: Parameter rule not implemented
+[FAIL] "MRV R 2000 2000 1000 0 0.5 1" -> INVALID  ERROR: Parameter rule not implemented
+[FAIL] "MSV M02 2000" -> INVALID  ERROR: Parameter rule not implemented
+[FAIL] "MSR M06 1" -> INVALID  ERROR: Parameter rule not implemented
+[FAIL] "MPV M01 M03 1200.0 -35.5" -> INVALID  ERROR: Parameter rule not implemented
+[FAIL] "MPR M01 M03 1200.0 -35.5" -> INVALID  ERROR: Parameter rule not implemented
+[PASS] "SPI R U 10 5 2" -> VALID
+[FAIL] "DFRS ScanRoutine01" -> INVALID  ERROR: Parameter rule not implemented
+[FAIL] "FLM M10 0.2 V 0.01 TH 255" -> INVALID  ERROR: Parameter rule not implemented
+[FAIL] "FLM M08 2 V 0.2" -> INVALID  ERROR: Parameter rule not implemented
+[PASS] "BKN 0.015" -> VALID
+
+[RESULT] 6/16 tests passed.
+
+```
+* 修改正則表示式後的情況
+```text
+herman@RPiCM5:~/Gmt_CMD_Parser/build $ ./parser_parameter_test
+[PASS] "INS 1" -> VALID
+[PASS] "SAH M01 M02 M03" -> VALID
+[PASS] "SHC M01 2 17 400000 40000 0 128" -> VALID
+[PASS] "SHC? M01" -> VALID
+[PASS] "VLS 0.15" -> VALID
+[PASS] "MOV R 2000 2000 1000 0 0.5 1" -> VALID
+[PASS] "MRV R 2000 2000 1000 0 0.5 1" -> VALID
+[PASS] "MSV M02 2000" -> VALID
+[PASS] "MSR M06 1" -> VALID
+[PASS] "MPV M01 M03 1200.0 -35.5" -> VALID
+[PASS] "MPR M01 M03 1200.0 -35.5" -> VALID
+[PASS] "SPI R U 10 5 2" -> VALID
+[PASS] "DFRS ScanRoutine01" -> VALID
+[PASS] "FLM M10 0.2 V 0.01 TH 255" -> VALID
+[PASS] "FLM M08 2 V 0.2" -> VALID
+[PASS] "BKN 0.015" -> VALID
+
+[RESULT] 16/16 tests passed.
+
+```
+
