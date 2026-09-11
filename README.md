@@ -1835,3 +1835,1318 @@ herman@RPiCM5:~/Gmt_CMD_Parser/build $ ./parser_parameter_test
 
 ```
 
+# [2026-09-11] 更新
+
+## 測試結果：
+```text
+herman@RPiCM5:~/Gmt_CMD_Parser/build $ ./GMT_Server_Command
+
+========================================
+GMT Server Command Test
+========================================
+[OK] socket() created. fd=3
+[OK] bind() successful. port=9999
+[OK] listen() successful.
+[WAIT] Waiting for client connection...
+[OK] Client connected. fd=4
+[RX] SHC M01 2 17 400000 40000 0 128
+[Parser] VALID
+[TX] VALID
+[RX] SHC? M01
+[Parser] VALID
+[TX] VALID
+[RX] SVO
+[Parser] VALID
+[TX] VALID
+[RX] SVF
+[Parser] VALID
+[TX] VALID
+[RX] CAL
+[Parser] VALID
+[TX] VALID
+[RX] DSC
+[Parser] VALID
+[TX] VALID
+[RX] VLS 0.15
+[Parser] VALID
+[TX] VALID
+[RX] MOV R 2000 2000 1000 0 0.5 1
+[Parser] VALID
+[TX] VALID
+[RX] MRV R 2000 2000 1000 0 0.5 1
+[Parser] VALID
+[TX] VALID
+[RX] MSV M02 2000
+[Parser] VALID
+[TX] VALID
+[RX] MSR M06 1
+[Parser] VALID
+[TX] VALID
+[RX] MPV M01 M03 1200.0 -35.5
+[Parser] VALID
+[TX] VALID
+[RX] MPR M01 M03 1200.0 -35.5
+[Parser] VALID
+[TX] VALID
+[RX] 17
+[Parser] INVALID - Unknown command
+[TX] INVALID
+[INFO] Client disconnected.
+
+```
+---
+
+# GMT_CMD_PARSER
+
+## 1. 專案說明
+
+`GMT_CMD_PARSER` 是 GMT Motion Control 系統中的 **CM5 Command Parser 專案**。
+
+目前系統的目標架構如下：
+
+```text
+┌──────────────────────────────┐
+│ End User                     │
+│ Windows 11                   │
+│ GMT_Client_Command           │
+│ CLI TCP Client               │
+└──────────────┬───────────────┘
+               │
+               │ TCP :9999
+               ▼
+┌──────────────────────────────┐
+│ Raspberry Pi CM5             │
+│ GMT_CMD_PARSER               │
+│                              │
+│ TCP Server                   │
+│      │                       │
+│      ▼                       │
+│ Command Parser               │
+└──────────────┬───────────────┘
+               │
+               │ VALID Command
+               ▼
+┌──────────────────────────────┐
+│ USB CDC ACM Transport        │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ STM32H755                    │
+│ Command Receiver             │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ SPI1 / EtherCAT              │
+│ Motion Control               │
+└──────────────────────────────┘
+```
+
+目前本階段主要完成：
+
+```text
+Windows Client
+      ↓
+TCP Server
+      ↓
+Command Parser
+```
+
+USB CDC、STM32H755 及 EtherCAT 尚未接入本階段測試。
+
+---
+
+# 2. 本次階段的開發目的
+
+本次工作的主要目的，是先把：
+
+> **End User → TCP Server → Command Parser**
+
+這一段完整驗證。
+
+在正式接上 USB Transport 之前，必須先確認以下功能：
+
+1. Windows End User 可以建立 TCP 連線。
+2. CM5 TCP Server 可以接受 TCP Client。
+3. TCP Client 可以持續輸入多筆 Command。
+4. TCP Server 可以收到完整 Command。
+5. TCP Server 可以呼叫獨立的 `CommandParser`。
+6. Parser 可以判斷 Command 是否 VALID。
+7. VALID Command 回傳 `VALID`。
+8. INVALID Command 回傳 `INVALID`。
+9. TCP Client 可以顯示 Server 回應。
+10. Client 與 Server 可以保持同一條 TCP Connection，連續測試多筆命令。
+11. Client 斷線後，Server 可以正確結束目前的 Client Session。
+
+這一階段的重點不是控制馬達，而是先建立穩定的 **Command TCP Interface + Parser Interface**。
+
+---
+
+# 3. 專案目前結構
+
+目前 `GMT_CMD_PARSER` 的主要結構如下：
+
+```text
+GMT_CMD_PARSER/
+├── CMakeLists.txt
+├── include/
+│   ├── command_parser.h
+│   └── tcp_server.h
+└── src/
+    ├── main.cpp
+    ├── tcp_server.cpp
+    ├── command_parser.cpp
+    ├── parser_test.cpp
+    ├── parser_parameter_test.cpp
+    └── GMT_Server_Command.cpp
+```
+
+各檔案用途如下：
+
+| 檔案                          | 用途                                   |
+| --------------------------- | ------------------------------------ |
+| `main.cpp`                  | 正式 GMT Command Parser 程式入口           |
+| `tcp_server.cpp`            | 正式 TCP Server 實作                     |
+| `tcp_server.h`              | TCP Server Class Interface           |
+| `command_parser.cpp`        | Command Parser 實作                    |
+| `command_parser.h`          | Command Parser Interface             |
+| `parser_test.cpp`           | Parser 基本 Command 測試                 |
+| `parser_parameter_test.cpp` | Parser Parameter / Manual Example 測試 |
+| `GMT_Server_Command.cpp`    | TCP Server + Parser 整合測試程式           |
+
+---
+
+# 4. Command Parser 的設計原則
+
+Command Parser 必須與 TCP Server 分離。
+
+目前設計：
+
+```text
+TCP Server
+    │
+    │ Command string
+    ▼
+CommandParser::parse()
+    │
+    ├── VALID
+    │
+    └── INVALID
+```
+
+Parser 的責任只有：
+
+> 判斷 Command 的格式與目前已確認的參數規則是否正確。
+
+Parser 不負責：
+
+* TCP Socket 管理
+* USB 傳輸
+* STM32 控制
+* EtherCAT
+* Motion Algorithm
+* Axis Control
+
+因此未來 TCP Server、USB Transport 與 Command Parser 可以各自維護。
+
+---
+
+# 5. Parser Interface
+
+目前 Parser 使用：
+
+```cpp
+ParseResult CommandParser::parse(const std::string& input) const;
+```
+
+回傳：
+
+```cpp
+struct ParseResult
+{
+    ParserResult result;
+    std::string command;
+    std::string payload;
+    std::string error;
+};
+```
+
+其中：
+
+```text
+ParserResult::VALID
+ParserResult::INVALID
+```
+
+代表 Parser 的判斷結果。
+
+這種設計可以讓 TCP Server 不需要知道 Parser 內部的 Regex 或參數規則。
+
+---
+
+# 6. 今天 TCP Server 的修改目的
+
+原本 TCP Server 主要只是建立 TCP Socket、接受 Client，並進行非常基本的資料交換。
+
+原始測試方式主要是：
+
+```text
+TCP Client
+    ↓
+TCP Server
+    ↓
+HELLO_OK
+```
+
+這樣只能確認 TCP Connection 本身正常。
+
+但是正式系統需要的是：
+
+```text
+TCP Client
+    ↓
+Command
+    ↓
+TCP Server
+    ↓
+Command Parser
+    ↓
+VALID / INVALID
+```
+
+因此今天沒有直接大幅修改正式的：
+
+```text
+src/tcp_server.cpp
+```
+
+而是先新增獨立的測試程式：
+
+```text
+src/GMT_Server_Command.cpp
+```
+
+這樣可以避免在正式 TCP Server 尚未完全驗證之前，直接修改已存在的正式架構。
+
+---
+
+# 7. 為什麼新增 GMT_Server_Command.cpp
+
+新增：
+
+```text
+src/GMT_Server_Command.cpp
+```
+
+主要目的：
+
+> 建立一個獨立的 TCP Server + Command Parser Integration Test。
+
+它不是最終正式 Server，而是用來驗證：
+
+```text
+TCP Socket
+      ↓
+Receive Command
+      ↓
+CommandParser
+      ↓
+VALID / INVALID
+      ↓
+TCP Response
+```
+
+這個做法可以將：
+
+```text
+TCP Server 問題
+```
+
+與：
+
+```text
+Command Parser 問題
+```
+
+先分開驗證。
+
+---
+
+# 8. GMT_Server_Command.cpp 的工作流程
+
+目前測試 Server 的流程如下：
+
+```text
+Start
+  │
+  ▼
+Create TCP Socket
+  │
+  ▼
+Bind 0.0.0.0:9999
+  │
+  ▼
+Listen
+  │
+  ▼
+Accept Client
+  │
+  ▼
+Create CommandParser
+  │
+  ▼
+recv()
+  │
+  ▼
+取得 Command
+  │
+  ▼
+CommandParser::parse()
+  │
+  ├───────────────┐
+  │               │
+ VALID          INVALID
+  │               │
+  ▼               ▼
+"VALID\r\n"     "INVALID\r\n"
+  │               │
+  └───────┬───────┘
+          ▼
+      send()
+          │
+          ▼
+      Continue
+```
+
+只要 Client 沒有斷線，就可以持續接收下一筆 Command。
+
+---
+
+# 9. TCP Server 的測試 Port
+
+Command TCP 使用：
+
+```text
+TCP Port = 9999
+```
+
+目前設定：
+
+```text
+Server Address:
+0.0.0.0
+
+Server Port:
+9999
+```
+
+Windows Client 目前使用：
+
+```text
+192.168.137.200:9999
+```
+
+其中：
+
+```text
+192.168.137.200
+```
+
+為 CM5 在目前測試網路環境中的 IP。
+
+---
+
+# 10. GMT_Client_Command
+
+為了測試 CM5 TCP Server，另外建立 Windows End User CLI Client：
+
+```text
+GMT_Client_Command
+```
+
+Windows 專案與 `GMT_CMD_PARSER` 是兩個不同專案。
+
+架構：
+
+```text
+Windows 11
+GMT_Client_Command
+       │
+       │ TCP
+       ▼
+Raspberry Pi CM5
+GMT_CMD_PARSER
+       │
+       ▼
+CommandParser
+```
+
+`GMT_Client_Command` 的角色就是模擬真正的 End User。
+
+未來真正的上位機或 End User Application 也可以使用相同的 TCP Command Interface。
+
+---
+
+# 11. GMT_Client_Command 的工作方式
+
+Windows Client 啟動後：
+
+```text
+[CONNECT] 192.168.137.200:9999
+[OK] Connected to TCP Server.
+```
+
+之後進入：
+
+```text
+GMT>
+```
+
+使用者可以直接輸入：
+
+```text
+GMT> 1
+```
+
+也可以直接輸入完整 Command：
+
+```text
+GMT> MPV M01 M03 1200.0 -35.5
+```
+
+Client 將 Command 加上：
+
+```text
+\r\n
+```
+
+再透過 TCP 傳送給 CM5。
+
+---
+
+# 12. Menu Command 測試方式
+
+目前 Windows Client 提供已確認 Manual Example 的選單。
+
+例如：
+
+```text
+1.  INS 1
+2.  STP
+3.  SAH M01 M02 M03
+4.  SHC M01 2 17 400000 40000 0 128
+5.  SHC? M01
+6.  SVO
+7.  SVF
+8.  CAL
+9.  DSC
+10. VLS 0.15
+11. MOV R 2000 2000 1000 0 0.5 1
+12. MRV R 2000 2000 1000 0 0.5 1
+13. MSV M02 2000
+14. MSR M06 1
+15. MPV M01 M03 1200.0 -35.5
+16. MPR M01 M03 1200.0 -35.5
+17. MOV?
+18. POS?
+19. PMS?
+20. SPI R U 10 5 2
+21. SPI?
+22. FRS?
+23. DFRS ScanRoutine01
+24. FLM M10 0.2 V 0.01 TH 255
+25. BKN?
+```
+
+例如輸入：
+
+```text
+GMT> 15
+```
+
+Client 會將：
+
+```text
+MPV M01 M03 1200.0 -35.5
+```
+
+送給 TCP Server。
+
+---
+
+# 13. Menu Index Mapping
+
+Client 內部使用：
+
+```cpp
+std::vector<std::string>
+```
+
+保存測試命令。
+
+輸入：
+
+```text
+15
+```
+
+不應該直接把：
+
+```text
+15
+```
+
+送到 Server。
+
+而是要轉換成：
+
+```text
+MPV M01 M03 1200.0 -35.5
+```
+
+這也是今天測試過程中發現並修正的重要問題。
+
+修正後：
+
+```text
+GMT> 15
+[TX] MPV M01 M03 1200.0 -35.5
+[RX] VALID
+```
+
+代表：
+
+```text
+Menu
+  ↓
+Command Mapping
+  ↓
+TCP
+  ↓
+Parser
+```
+
+整條路徑正常。
+
+---
+
+# 14. Free-form Command
+
+除了 Menu 之外，Windows Client 也可以直接輸入 Command。
+
+例如：
+
+```text
+GMT> UNKNOWN
+```
+
+Client：
+
+```text
+[TX] UNKNOWN
+```
+
+Server：
+
+```text
+INVALID
+```
+
+Client：
+
+```text
+[RX] INVALID
+```
+
+這可以用來驗證 Parser 的 INVALID Path。
+
+---
+
+# 15. TCP Persistent Connection
+
+今天另外確認了 TCP Connection 可以保持。
+
+不是每一筆 Command 都重新建立 Socket。
+
+流程為：
+
+```text
+Connect
+   │
+   ├── Command 1
+   ├── Response 1
+   │
+   ├── Command 2
+   ├── Response 2
+   │
+   ├── Command 3
+   ├── Response 3
+   │
+   └── ...
+```
+
+例如：
+
+```text
+GMT> 1
+[TX] INS 1
+[RX] VALID
+
+GMT> 15
+[TX] MPV M01 M03 1200.0 -35.5
+[RX] VALID
+
+GMT> 25
+[RX] VALID
+
+GMT> UNKNOWN
+[TX] UNKNOWN
+[RX] INVALID
+```
+
+這表示 Client 與 Server 的基本 Command Session 已經可以正常工作。
+
+---
+
+# 16. CRLF Command Format
+
+目前 TCP Command 使用：
+
+```text
+\r\n
+```
+
+作為 Command 結尾。
+
+因此 Windows Client 實際傳送的是：
+
+```text
+COMMAND\r\n
+```
+
+例如：
+
+```text
+MOV R 2000 2000 1000 0 0.5 1\r\n
+```
+
+Parser 本身已經能夠處理：
+
+```text
+\r
+\n
+```
+
+因此 TCP Server 不需要為了 Parser 再建立另一套特殊 Command 格式。
+
+---
+
+# 17. GMT_Server_Command 與正式 TCP Server 的關係
+
+必須特別說明：
+
+```text
+src/GMT_Server_Command.cpp
+```
+
+目前是：
+
+> 測試用 TCP Server。
+
+而：
+
+```text
+src/tcp_server.cpp
+```
+
+才是：
+
+> 正式 GMT_CMD_PARSER TCP Server。
+
+目前沒有直接用測試程式取代正式程式。
+
+這是刻意的架構保護方式。
+
+目前開發順序：
+
+```text
+正式 TCP Server
+       │
+       │ 保持穩定
+       ▼
+新增 GMT_Server_Command
+       │
+       ▼
+驗證 TCP + Parser
+       │
+       ▼
+測試成功
+       │
+       ▼
+再整合回正式 TcpServer
+```
+
+因此 `GMT_Server_Command.cpp` 的目的不是形成另一個永久 Server 架構。
+
+測試成功後，正式功能應該回存到：
+
+```text
+src/tcp_server.cpp
+include/tcp_server.h
+```
+
+而不是長期依賴測試程式。
+
+---
+
+# 18. CMake 測試 Target
+
+目前 `CMakeLists.txt` 除了正式：
+
+```text
+Gmt_CMD_Parser
+```
+
+以及 Parser Test：
+
+```text
+parser_test
+parser_parameter_test
+```
+
+之外，增加：
+
+```text
+GMT_Server_Command
+```
+
+對應：
+
+```text
+src/GMT_Server_Command.cpp
+src/command_parser.cpp
+```
+
+這樣可以單獨編譯 TCP Server + Parser Integration Test。
+
+---
+
+# 19. 目前已完成的 Parser 測試
+
+目前已確認的 Manual Example 包含：
+
+```text
+INS 1
+SAH M01 M02 M03
+SHC M01 2 17 400000 40000 0 128
+SHC? M01
+VLS 0.15
+MOV R 2000 2000 1000 0 0.5 1
+MRV R 2000 2000 1000 0 0.5 1
+MSV M02 2000
+MSR M06 1
+MPV M01 M03 1200.0 -35.5
+MPR M01 M03 1200.0 -35.5
+SPI R U 10 5 2
+DFRS ScanRoutine01
+FLM M10 0.2 V 0.01 TH 255
+FLM M08 2 V 0.2
+BKN 0.015
+```
+
+另外也確認多個無參數 Command：
+
+```text
+STP
+SVO
+SVF
+CAL
+DSC
+MOV?
+POS?
+PMS?
+SPI?
+FRS?
+BKN?
+```
+
+INVALID 測試則包含：
+
+```text
+STP 123
+SVO ABC
+MOV? 123
+UNKNOWN
+empty input
+```
+
+目前 Parser 測試均已通過。
+
+---
+
+# 20. 今天的 End-to-End 測試
+
+本階段最重要的測試路徑：
+
+```text
+Windows 11
+GMT_Client_Command
+        │
+        │ TCP 192.168.137.200:9999
+        ▼
+CM5
+GMT_Server_Command
+        │
+        ▼
+CommandParser
+```
+
+測試結果：
+
+```text
+[CONNECT] 192.168.137.200:9999
+[OK] Connected to TCP Server.
+```
+
+Menu Command 測試：
+
+```text
+GMT> 1
+[TX] INS 1
+[RX] VALID
+```
+
+```text
+GMT> 15
+[TX] MPV M01 M03 1200.0 -35.5
+[RX] VALID
+```
+
+INVALID：
+
+```text
+GMT> UNKNOWN
+[TX] UNKNOWN
+[RX] INVALID
+```
+
+最後：
+
+```text
+GMT> 0
+```
+
+正常離開 Client。
+
+本階段確認：
+
+```text
+TCP Connection        PASS
+Persistent Connection PASS
+Command Transmission  PASS
+CRLF                  PASS
+Menu Mapping          PASS
+Free-form Command     PASS
+Parser VALID          PASS
+Parser INVALID        PASS
+TCP Response          PASS
+Client Disconnect     PASS
+```
+
+---
+
+# 21. 為什麼目前還不直接接 USB
+
+目前先不把：
+
+```text
+CommandParser
+      ↓
+USB Transport
+      ↓
+STM32H755
+```
+
+接進來，是刻意的開發順序。
+
+原因是必須先把：
+
+```text
+End User
+    ↓
+TCP
+    ↓
+Parser
+```
+
+驗證完成。
+
+如果 TCP、Parser、USB、STM32 同時接在一起，一旦出現：
+
+```text
+Command INVALID
+```
+
+或：
+
+```text
+Command 沒有送到 STM32
+```
+
+就很難立即判斷問題位於：
+
+```text
+Windows Client
+TCP
+TCP Server
+Parser
+USB Transport
+STM32 USB CDC
+```
+
+哪一層。
+
+因此目前採用分層驗證。
+
+---
+
+# 22. 後續正式架構
+
+完成目前測試後，下一階段將把已驗證的：
+
+```text
+GMT_Server_Command.cpp
+```
+
+功能整合回正式：
+
+```text
+tcp_server.cpp
+```
+
+最後正式程式應該形成：
+
+```text
+End User TCP Client
+        │
+        ▼
+TcpServer
+        │
+        ▼
+CommandParser
+        │
+        ├── INVALID
+        │      │
+        │      ▼
+        │   TCP Error Response
+        │
+        └── VALID
+               │
+               ▼
+          USB Transport
+               │
+               ▼
+           STM32H755
+```
+
+其中：
+
+> INVALID Command 不得進入 USB Transport。
+
+只有：
+
+```text
+ParserResult::VALID
+```
+
+的 Command 才能進入下一層。
+
+---
+
+# 23. Parser 的後續擴充
+
+目前已確認的 Command 尚未達到最終預定的約 36 個 Command。
+
+因此後續仍需依照正式 Manual / Command Document：
+
+```text
+確認 Command
+      ↓
+確認 Manual Example
+      ↓
+建立 Parser Rule
+      ↓
+建立 Parameter Test
+      ↓
+編譯
+      ↓
+Parser Test
+      ↓
+TCP End-to-End Test
+```
+
+重要原則：
+
+> 沒有 Manual Example 或明確規格的 Command，不自行猜測參數格式與範圍。
+
+這可以避免 Parser 先入為主地把尚未確認的規則寫死。
+
+---
+
+# 24. 測試檔案的定位
+
+目前測試分成不同層級。
+
+### Parser 基本測試
+
+```text
+src/parser_test.cpp
+```
+
+主要確認：
+
+```text
+Command 是否存在
+Command 是否 VALID / INVALID
+```
+
+### Parser Parameter Test
+
+```text
+src/parser_parameter_test.cpp
+```
+
+主要確認：
+
+```text
+Manual Example
+Parameter Format
+Regex Rule
+```
+
+### TCP Server Integration Test
+
+```text
+src/GMT_Server_Command.cpp
+```
+
+主要確認：
+
+```text
+Windows TCP Client
+        ↓
+TCP Server
+        ↓
+CommandParser
+        ↓
+TCP Response
+```
+
+三者的責任不同，不應混在同一個測試程式中。
+
+---
+
+# 25. GitHub Checkpoint 原則
+
+目前開發採用：
+
+```text
+修改
+  ↓
+編譯
+  ↓
+單元測試
+  ↓
+Integration Test
+  ↓
+End-to-End Test
+  ↓
+確認 PASS
+  ↓
+GitHub Checkpoint
+```
+
+測試用程式可以暫時存在，以降低直接修改正式架構造成的風險。
+
+但是：
+
+> 測試成功後，正式功能必須整合回正式程式。
+
+不能讓：
+
+```text
+GMT_Server_Command.cpp
+```
+
+永久取代正式：
+
+```text
+tcp_server.cpp
+```
+
+也不應該建立一個長期維護的「測試版 Server 分支」。
+
+---
+
+# 26. 目前開發進度
+
+目前完成：
+
+```text
+[✓] Command Parser 基本架構
+[✓] Parser 基本測試
+[✓] Parser Parameter Test
+[✓] CM5 TCP Server 基礎
+[✓] Windows GMT_Client_Command
+[✓] TCP Port 9999
+[✓] Persistent TCP Connection
+[✓] CLI Command Menu
+[✓] Menu Index Mapping
+[✓] Free-form Command
+[✓] CRLF Command
+[✓] GMT_Server_Command Integration Test
+[✓] TCP → Parser
+[✓] VALID Response
+[✓] INVALID Response
+[✓] 25 個已確認 Command / Manual Example
+[✓] End-to-End Test
+```
+
+尚未完成：
+
+```text
+[ ] Parser 剩餘 Command 完整化
+[ ] GMT_Server_Command 功能整合回正式 TcpServer
+[ ] 正式 TCP Server 完整 Session 管理
+[ ] TCP Response 正式格式定義
+[ ] USB Transport 整合
+[ ] STM32H755 Command Receiver
+[ ] STM32 → CM5 Response
+[ ] CM5 → Windows TCP Response
+[ ] EtherCAT Motion Execution
+```
+
+---
+
+# 27. 最終目標
+
+最終 Command Control Path：
+
+```text
+┌─────────────────────┐
+│ End User            │
+│ GMT_Client_Command  │
+└──────────┬──────────┘
+           │
+           │ TCP :9999
+           ▼
+┌─────────────────────┐
+│ CM5                 │
+│ GMT_CMD_PARSER      │
+│                     │
+│ TcpServer           │
+│      ↓              │
+│ CommandParser       │
+└──────────┬──────────┘
+           │
+           │ VALID
+           ▼
+┌─────────────────────┐
+│ USB CDC Transport   │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ STM32H755           │
+│ Command Receiver    │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ EtherCAT / Motion   │
+│ Controller          │
+└─────────────────────┘
+```
+
+Response Path 則為：
+
+```text
+STM32H755
+    │
+    │ Execution Result
+    ▼
+USB CDC
+    │
+    ▼
+CM5
+    │
+    ▼
+TCP Server
+    │
+    ▼
+End User
+```
+
+因此 `GMT_CMD_PARSER` 最終會成為：
+
+> **End User Command 與 STM32 Motion Control System 之間的 CM5 Command Gateway。**
+
+---
+
+# 28. 開發原則
+
+本專案後續持續遵守以下原則：
+
+1. **Parser 與 TCP Server 分離。**
+2. **TCP Server 與 USB Transport 分離。**
+3. **Parser 不負責 Motion Control。**
+4. **INVALID Command 不進 USB。**
+5. **只有 VALID Command 才能進入下一層。**
+6. **優先依照正式 Manual 建立 Parser 規則。**
+7. **沒有規格的參數不自行猜測。**
+8. **先建立獨立 Test，再整合回正式程式。**
+9. **每完成一個階段都必須 Compile + Test。**
+10. **確認所有測試 PASS 後建立 GitHub Checkpoint。**
+11. **避免不必要的大幅修改既有架構。**
+12. **測試程式不應取代正式架構。**
+
+---
+
+# 29. 本階段 Checkpoint
+
+目前已完成：
+
+```text
+GMT_Client_Command
+        │
+        │ TCP
+        ▼
+GMT_Server_Command
+        │
+        ▼
+CommandParser
+```
+
+而且已完成 Windows → CM5 → Parser 的實際 End-to-End 測試。
+
+因此目前可以將本階段視為：
+
+```text
+TCP Client
+    +
+TCP Server
+    +
+Command Parser
+    +
+Integration Test
+```
+
+的完整 Checkpoint。
+
+下一階段應在這個穩定基礎上，逐步將測試成功的 TCP Server + Parser 邏輯整合回正式 `TcpServer`，再進一步處理 USB Transport。
+
+> 今天的重點在 **「為什麼新增 `GMT_Server_Command.cpp`、它和正式 `tcp_server.cpp` 的關係、以及它如何對應 Windows `GMT_Client_Command`」**，並且保留後續要整合回正式架構的原則。
+
+
+

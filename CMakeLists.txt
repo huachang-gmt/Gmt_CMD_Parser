@@ -25,6 +25,11 @@ add_executable(parser_parameter_test
     src/command_parser.cpp
 )
 
+add_executable(GMT_Server_Command
+    src/GMT_Server_Command.cpp
+    src/command_parser.cpp
+)
+
 target_include_directories(Gmt_CMD_Parser
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -35,5 +40,9 @@ target_include_directories(parser_test PRIVATE
 )
 
 target_include_directories(parser_parameter_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_include_directories(GMT_Server_Command PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
