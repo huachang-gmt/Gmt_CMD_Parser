@@ -19,10 +19,10 @@ constexpr const char* REGEX_INS =
     R"(^\s*(0|1)\s*$)";
 
 constexpr const char* REGEX_SAH =
-    R"(^\s*(A|M[0-9]{2})(\s+(A|M[0-9]{2})){2}\s*$)";
+    R"(^\s*(?:A|M(?:0?[1-9]|1[0-6])(?:\s+M(?:0?[1-9]|1[0-6]))*)\s*$)";
 
 constexpr const char* REGEX_SHC =
-    R"(^\s*M[0-9]{2}\s+[+-]?[0-9]+\s+[+-]?[0-9]+\s+[+-]?[0-9]+\s+[+-]?[0-9]+(?:\.[0-9]+)?\s+[+-]?[0-9]+(?:\.[0-9]+)?\s+[+-]?[0-9]+\s*$)";
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s*$)";
 
 constexpr const char* REGEX_SHC_QUERY =
     R"(^\s*M[0-9]{2}\s*$)";
@@ -130,7 +130,8 @@ CommandParser::CommandParser()
 }
 
 ParseResult CommandParser::parse(const std::string& input) const
-{
+{   
+    
     std::string command;
     std::string parameters;
 
@@ -193,7 +194,7 @@ ParseResult CommandParser::parse(const std::string& input) const
                 ParserResult::INVALID,
                 command,
                 "",
-                "Invalid parameters"
+                "Invalid parameters\r\n"
             };
         }
 
@@ -209,6 +210,6 @@ ParseResult CommandParser::parse(const std::string& input) const
         ParserResult::INVALID,
         command,
         "",
-        "Unknown command"
+        "Invalid command format.\r\n"
     };
 }

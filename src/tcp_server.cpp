@@ -1,5 +1,5 @@
 #include "tcp_server.h"
-
+#include "command_parser.h"
 #include <iostream>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -99,23 +99,30 @@ void TcpServer::run()
 
     buffer[received] = '\0';
 
+
     std::cout << "[RX] " << buffer;
 
-    const char response[] = "HELLO_OK\r\n";
+    CommandParser parser;
+    const ParseResult result = parser.parse(buffer);
 
-    const ssize_t sent = send(
-        client_fd_,
-        response,
-        sizeof(response) - 1,
-        0);
-
-    if (sent < 0)
+    if (result.result == ParserResult::INVALID)
     {
-        std::cerr << "[ERROR] send() failed." << std::endl;
+        const ssize_t sent = send(
+            client_fd_,
+            result.error.c_str(),
+            result.error.size(),
+            0);
+
+        if (sent < 0)
+        {
+            std::cerr << "[ERROR] send() failed." << std::endl;
+            return;
+        }
+
+        std::cout << "[TX] " << result.error;
         return;
     }
 
-    std::cout << "[TX] HELLO_OK" << std::endl;
-
+    std::cout << "[PARSE] VALID" << std::endl;
 
 }

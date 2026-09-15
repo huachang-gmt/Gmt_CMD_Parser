@@ -3148,5 +3148,2210 @@ Integration Test
 
 > 今天的重點在 **「為什麼新增 `GMT_Server_Command.cpp`、它和正式 `tcp_server.cpp` 的關係、以及它如何對應 Windows `GMT_Client_Command`」**，並且保留後續要整合回正式架構的原則。
 
+---
+
+![TCP_Client_EndUser](images/EndUser_TCP_Client.png)
+---
+![TCP_Server_Parser](images/Command_parser_TCP_Server.png)
+
+---
+# Command Parser 命令逐一修正過程
+## 以下將把每一個命令做法修改詳細說明
+
+**第一個先處理 INS，這一輪只處理 INS，不提前修改其他 Command。**
+
+## 1. 先核對目前 INS Parser
+
+目前 `src/command_parser.cpp` 已經有：
+
+```cpp
+constexpr const char* REGEX_INS = R"(^\s*(0|1)\s*$)";
+```
+
+這個規則與你剛剛給的規格是**符合的**：
+
+| 測試        | 結果                |
+| --------- | ----------------- |
+| `INS 0`   | VALID             |
+| `INS 1`   | VALID             |
+| `INS 2`   | INVALID           |
+| `INS 3`   | INVALID           |
+| `INS -1`  | INVALID           |
+| `INS 01`  | INVALID           |
+| `INS`     | INVALID           |
+| `INS 0 1` | INVALID           |
+| `INS A`   | INVALID           |
+| `ins 1`   | INVALID，且會被大寫規則攔截 |
+
+所以 **INS 的 Command Parser 目前不需要修改**。
+
+這點我們先保留，不要為了 INS 去改 Regex。
+
+---
+
+# 2. 建立 Response Array
+
+現在進入你指定的新功能。
+
+這個 Response Array 我建議放在：
+
+```text
+~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp
+```
+
+因為目前這個檔案就是我們的 **Command → 模擬 Response 測試 Server**。
+
+先在 `GMT_Server_Command.cpp` 的 include 後、`main()` 前面增加一個 Response Rule 結構。
+
+### 新增：
+
+```cpp
+struct ResponseRule
+{
+    const char* command;
+    const char* responses[3];
+    const char* default_response;
+};
+```
+
+然後建立：
+
+```cpp
+static const ResponseRule RESPONSE_RULES[] =
+{
+    {
+        "INS",
+        {
+            "Connected.\r\n",
+            "Connecting...\r\n",
+            "Connect fail.\r\n"
+        },
+        "Connected.\r\n"
+    }
+};
+```
+
+這樣目前 INS 就有：
+
+```text
+INS
+ ├─ Connected.
+ ├─ Connecting...
+ ├─ Connect fail.
+ └─ DEFAULT → Connected.
+```
+
+### 為什麼現在先固定 `[3]`
+
+因為你已經明確定義：
+
+> INS 有三種 Response。
+
+先用固定陣列，不使用 `std::vector`，也方便未來維持你希望的簡單、固定資料結構。
+
+之後如果不同 Command 有不同數量，我們再根據實際規格調整結構；**現在不要過度設計。**
+
+---
+
+# 3. 修改目前的 `DONE` 模擬 Response
+
+你剛才測試時，VALID 是：
+
+```cpp
+response = "DONE\r\n";
+```
+
+這個現在要開始被我們新的 Response Array 取代。
+
+在 `GMT_Server_Command.cpp` 裡面，找到目前 Parser 後面處理：
+
+```cpp
+const ParseResult result = parser.parse(buffer);
+```
+
+以及：
+
+```cpp
+if (result.result == ParserResult::VALID)
+{
+    response = "DONE\r\n";
+}
+else
+{
+    response = result.error.c_str();
+}
+```
+
+這一段**先不要自己大改**。
+
+我們這一步需要增加一個非常小的「依 Command 找 DEFAULT Response」流程。
+
+概念是：
+
+```text
+Parser
+ ↓
+VALID
+ ↓
+找 result.command
+ ↓
+RESPONSE_RULES[]
+ ↓
+找到 INS
+ ↓
+取 default_response
+ ↓
+Connected.
+```
+
+而 INVALID 仍然：
+
+```text
+Parser
+ ↓
+INVALID
+ ↓
+result.error
+ ↓
+TCP Client
+```
+
+---
+
+## 4. 這一步先做最小修改
+
+在 `GMT_Server_Command.cpp`，`RESPONSE_RULES[]` 後面加入一個小函式：
+
+```cpp
+static const char* GetDefaultResponse(const char* command)
+{
+    for (const auto& rule : RESPONSE_RULES)
+    {
+        if (std::strcmp(rule.command, command) == 0)
+        {
+            return rule.default_response;
+        }
+    }
+
+    return "";
+}
+```
+
+所以這個檔案需要確認已經有：
+
+```cpp
+#include <cstring>
+```
+
+如果原本已經有，就**不要重複增加**。
+
+---
+
+然後把剛才的：
+
+```cpp
+response = "DONE\r\n";
+```
+
+改成：
+
+```cpp
+response = GetDefaultResponse(result.command.c_str());
+```
+
+因此現在 VALID 的處理會變成：
+
+```cpp
+if (result.result == ParserResult::VALID)
+{
+    response = GetDefaultResponse(result.command.c_str());
+}
+else
+{
+    response = result.error.c_str();
+}
+```
+
+**其他地方全部不要動。**
+
+---
+
+# 5. INS 第一輪測試
+
+重新 compile：
+
+```bash
+cd ~/Gmt_CMD_Parser/build
+cmake ..
+make -j$(nproc)
+```
+
+然後：
+
+```bash
+./GMT_Server_Command
+```
+
+Windows Client 依序測試：
+
+### VALID
+
+```text
+INS 0
+```
+
+預期：
+
+```text
+[RX RESPONSE] Connected.
+```
+
+再測：
+
+```text
+INS 1
+```
+
+預期也是：
+
+```text
+[RX RESPONSE] Connected.
+```
+
+### INVALID
+
+```text
+INS 2
+```
+
+應該仍然是 Parser 的錯誤 Response，而**不是** `Connected.`。
+
+再測：
+
+```text
+INS
+```
+
+也應該 INVALID。
+
+### 大小寫共通規則
+
+```text
+ins 1
+```
+
+應該收到：
+
+```text
+Error: Command characters must be uppercase.
+```
+
+---
+
+## 這一輪 INS 的判定標準
+
+我們要確認三件事：
+
+**① Parser**
+
+```text
+INS 0 → VALID
+INS 1 → VALID
+其他 → INVALID
+```
+
+**② Response simulation**
+
+```text
+INS 0 → Connected.
+INS 1 → Connected.
+```
+
+因為目前取的是 DEFAULT。
+
+**③ Client**
+
+每次都收到 Response 並重新出現：
+
+```text
+GMT>
+```
+
+---
+
+### 一個重要的設計確認
+
+你文件裡的：
+
+```text
+>Connecting...
+>Connected.
+```
+
+我會把 `>` 視為文件中的 Response 顯示提示符號，**實際 TCP Response 不包含前面的 `>`**。
+
+也就是實際送：
+
+```text
+Connecting...\r\n
+Connected.\r\n
+Connect fail.\r\n
+```
+
+而不是：
+
+```text
+>Connecting...\r\n
+```
+
+目前這樣處理是比較合理的。
+
+---
+
+你的兩個問題都對，我同意你的方向。不過第二點有一個地方我會稍微調整。
+
+## 1. `responses[3]` 改成 `vector`
+
+同意。
+
+因為後面的 Command 很可能會有 2、3、甚至更多 Response，固定：
+
+```cpp
+const char* responses[3];
+```
+
+沒有必要。
+
+可以改成：
+
+```cpp
+struct ResponseRule
+{
+    const char* command;
+    std::vector<const char*> responses;
+    const char* default_response;
+};
+```
+
+然後 INS：
+
+```cpp
+static const ResponseRule RESPONSE_RULES[] =
+{
+    {
+        "INS",
+        {
+            "Connected.\r\n",
+            "Connecting...\r\n",
+            "Connect fail.\r\n"
+        },
+        "Connected.\r\n"
+    }
+};
+```
+
+這樣之後增加 Response 就直接增加項目，不需要修改結構大小。
+
+不過因為我們的 `RESPONSE_RULES` 本身是固定資料，我會保留：
+
+```cpp
+static const ResponseRule RESPONSE_RULES[]
+```
+
+只有每個 Rule 裡面的 Response 數量使用 `std::vector`。
+
+---
+
+# 2. `return "";` 確實不應該保留
+
+你的判斷是對的。
+
+目前：
+
+```cpp
+static const char* GetDefaultResponse(const char* command)
+{
+    for (const auto& rule : RESPONSE_RULES)
+    {
+        if (std::strcmp(rule.command, command) == 0)
+        {
+            return rule.default_response;
+        }
+    }
+
+    return "";
+}
+```
+
+如果未來出現：
+
+```text
+Parser = VALID
+但 RESPONSE_RULES 沒有這個 Command
+```
+
+就會：
+
+```text
+GetDefaultResponse()
+        ↓
+return ""
+        ↓
+strlen(response) = 0
+        ↓
+TCP Client recv() 卡住
+```
+
+這正是我們剛剛才排除掉的問題。
+
+**所以不能再設計一個合法流程會回傳空 Response 的 fallback。**
+
+---
+
+# 3. 我同意你的 `DONE` 想法
+
+而且我認為這比 `return ""` 好很多。
+
+但我建議把它定義成：
+
+```cpp
+return "DONE\r\n";
+```
+
+也就是：
+
+> **如果 Parser 判定 VALID，但 Response Rule 找不到對應 Command，就使用 `DONE\r\n` 作為測試階段的安全 fallback。**
+
+這樣：
+
+```text
+VALID + 有 Response Rule
+        ↓
+該 Command 的 DEFAULT Response
+
+VALID + 沒有 Response Rule
+        ↓
+DONE
+
+INVALID
+        ↓
+Parser error
+```
+
+這樣就不會再出現：
+
+```text
+length = 0
+```
+
+造成 Client 阻塞。
+
+---
+
+## 但是有一個我想特別提醒你的地方
+
+這個 `DONE` **只應該是目前「Response 模擬階段」的 fallback**。
+
+不能把它當成正式 Response。
+
+因為未來我們完成所有 Command 的：
+
+```text
+RESPONSE_RULES
+```
+
+之後，正常情況應該永遠是：
+
+```text
+VALID
+ ↓
+找到 Command
+ ↓
+DEFAULT Response
+```
+
+所以理想狀態下：
+
+```cpp
+return "DONE\r\n";
+```
+
+這條路其實不應該被走到。
+
+它只是防止目前開發期間因為忘記加入某個 Command 的 Response Rule，而讓 TCP Client 再次卡住。
+
+---
+
+# 我建議這一輪修改成
+
+### `ResponseRule`
+
+```cpp
+struct ResponseRule
+{
+    const char* command;
+    std::vector<const char*> responses;
+    const char* default_response;
+};
+```
+
+### `GetDefaultResponse()`
+
+最後：
+
+```cpp
+return "DONE\r\n";
+```
+
+這兩項我同意修改。
+
+另外 `GMT_Server_Command.cpp` 必須確認：
+
+```cpp
+#include <vector>
+```
+
+如果沒有才增加。
+
+---
+
+### 還有一點：現在先不要測其他 Command
+
+這一輪我們只處理：
+
+**INS Response simulation infrastructure**
+
+然後測：
+
+```text
+INS 0 → Connected.
+INS 1 → Connected.
+INS 2 → Parser Error
+INS   → Parser Error
+ins 1 → Command characters must be uppercase.
+```
+
+等這些確認後，**INS 才算完成**。
+
+下一個 Command 再依照你提供的文件逐一檢討。
+
+所以你的兩個修改要求我都接受：
+
+* ✅ Response 數量改用 `vector`
+* ✅ `GetDefaultResponse()` 絕不回傳空字串
+* ✅ 未找到 Rule 時暫時回 `DONE\r\n` 作為安全 fallback
+
+這樣設計可以避免我們之前遇到的 `length=0 → Client 卡死` 再發生。
+
+---
+
+進入 **STP**。這次我會先核對 Parser，再加入 STP 的 Response Rule；不碰其他 Command。
+
+## 1. Parser 檢查結果
+
+目前 `src/command_parser.cpp` 已有：
+
+```cpp
+{"STP", REGEX_NO_PARAMETER}
+```
+
+而：
+
+```cpp
+constexpr const char* REGEX_NO_PARAMETER = R"(^\s*$)";
+```
+
+所以目前已符合你的規範：
+
+| 輸入         | 結果      |
+| ---------- | ------- |
+| `STP`      | VALID   |
+| `STP `     | VALID   |
+| `STP    `  | VALID   |
+| `STP<TAB>` | VALID   |
+| `STP 123`  | INVALID |
+| `STP ABC`  | INVALID |
+| `STP 0`    | INVALID |
+| `STP 1 2`  | INVALID |
+| `stp`      | INVALID |
+
+**Parser 不需要修改。**
+
+---
+
+# 2. 加入 STP Response
+
+檔案：
+
+```text
+~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp
+```
+
+目前的 `RESPONSE_RULES[]` 已經有 INS。
+
+在 `INS` 後面增加 `STP`：
+
+```cpp
+{
+    "STP",
+    {
+        "STP\r\n",
+        "Done\r\n"
+    },
+    "Done\r\n"
+}
+```
+
+因此目前結構會是：
+
+```cpp
+static const ResponseRule RESPONSE_RULES[] =
+{
+    {
+        "INS",
+        {
+            "Connected.\r\n",
+            "Connecting...\r\n",
+            "Connect fail.\r\n"
+        },
+        "Connected.\r\n"
+    },
+    {
+        "STP",
+        {
+            "STP\r\n",
+            "Done\r\n"
+        },
+        "Done\r\n"
+    }
+};
+```
+
+### Response 對應
+
+```text
+STP
+ ├─ STP
+ ├─ Done
+ └─ DEFAULT → Done
+```
+
+這裡文件寫的是：
+
+```text
+>STP
+>Done
+```
+
+和前面的 INS 一樣，我把 `>` 視為文件中的顯示提示符號，**實際 Response 不包含 `>`**。
+
+---
+
+## 3. 這次 Parser 不需要修改
+
+所以這一輪只有：
+
+**檔案**
+
+```text
+~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp
+```
+
+**修改**
+
+在 `RESPONSE_RULES[]` 增加 STP Rule。
+
+其他檔案不要動。
+
+---
+
+## 4. STP 測試
+
+編譯後測：
+
+### VALID
+
+```text
+STP
+```
+
+預期：
+
+```text
+[RX RESPONSE] Done.
+```
+
+因為目前使用 DEFAULT。
+
+### INVALID
+
+測：
+
+```text
+STP 123
+```
+
+應該收到 Parser 的錯誤訊息。
+
+再測：
+
+```text
+STP ABC
+```
+
+也應該 INVALID。
+
+再測：
+
+```text
+STP 0
+```
+
+也應該 INVALID。
+
+### 共通大小寫規則
+
+```text
+stp
+```
+
+應該收到：
+
+```text
+Error: Command characters must be uppercase.
+```
+
+---
+
+**這一輪只新增 STP Response Rule。**
+
+測試全部通過後，你把結果告訴我，我們就繼續下一個 Command。
+
+---
+
+文件中的 `>` 是 **Response 的提示符號 / prompt marker**，不是 Response payload 的一部分。
+
+例如：
+
+```text
+>STP
+>Done
+```
+
+實際 Response 應該是：
+
+```text
+STP
+Done
+```
+
+同樣：
+
+```text
+>Connecting...
+>Connected.
+```
+
+實際 Response 是：
+
+```text
+Connecting...
+Connected.
+```
+
+因此我們目前的 Response Array 寫法是正確的：
+
+```cpp
+"STP\r\n"
+"Done\r\n"
+```
+
+而不是：
+
+```cpp
+">STP\r\n"
+">Done\r\n"
+```
+
+這個規則我會從現在開始一致遵守，**後面你提供的文件中，只要看到 `>`，我會把它視為文件的 CLI/Response 顯示提示符號，不會自動加入實際 Response 字串。**
+
+另外，這也代表目前我們的 Response Rule 可以忠實對應文件的「真正 Response」，不會把文件格式符號誤當成通訊協定內容。
+
+---
+
+
+> **文件中的 `>` 就是 Response Command 的實際內容，必須包含在傳送給 Client 的 Response 裡。**
+
+後續所有 Response 都嚴格按照文件，**不自行移除 `>`**。
+
+## 這次只修改 Response Array
+
+檔案：
+
+```text
+~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp
+```
+
+### 1. INS
+
+目前：
+
+```cpp
+"Connected.\r\n",
+"Connecting...\r\n",
+"Connect fail.\r\n"
+```
+
+修改成：
+
+```cpp
+">Connected.\r\n",
+">Connecting...\r\n",
+">Connect fail.\r\n"
+```
+
+Default：
+
+```cpp
+">Connected.\r\n"
+```
+
+所以：
+
+```text
+INS
+ ├─ >Connected.
+ ├─ >Connecting...
+ ├─ >Connect fail.
+ └─ DEFAULT → >Connected.
+```
+
+### 2. STP
+
+目前：
+
+```cpp
+"STP\r\n",
+"Done\r\n"
+```
+
+修改成：
+
+```cpp
+">STP\r\n",
+">Done\r\n"
+```
+
+Default：
+
+```cpp
+">Done\r\n"
+```
+
+所以：
+
+```text
+STP
+ ├─ >STP
+ ├─ >Done
+ └─ DEFAULT → >Done
+```
+
+## 後續固定規則
+
+之後你提供的文件如果寫：
+
+```text
+>XXXX
+```
+
+我們就**原樣放進 Response Array**：
+
+```cpp
+">XXXX\r\n"
+```
+
+不再自行解讀或移除 `>`。
+---
+
+這裡要區分兩種不同的錯誤：
+
+* `stp` → **大小寫規範錯誤** → `Error: Command characters must be uppercase.`
+* `STP hjud` → **Command 正確，但參數不符合 STP 規範** → `Invalid parameters`
+
+你這個要求是合理的，而且目前 `REGEX_NO_PARAMETER` 已經正確判斷 `STP hjud` 為 INVALID，問題只是目前 Parser 對所有 INVALID 沒有進一步區分錯誤類型。
+
+### 這一步先修改 `command_parser.cpp`
+
+檔案：
+
+```text
+~/Gmt_CMD_Parser/src/command_parser.cpp
+```
+
+位置：
+
+```cpp
+CommandParser::parse()
+```
+
+目前 Command 找到之後，如果 Regex 不符合，應該有類似：
+
+```cpp
+"Invalid parameters\r\n"
+```
+
+如果你目前實際程式已經是這個字串，**那就不用修改 Parser**。
+
+但如果目前是其他錯誤，例如：
+
+```cpp
+"Invalid command\r\n"
+```
+
+就要改成：
+
+```cpp
+"Invalid parameters\r\n"
+```
+
+---
+
+### 這裡還要特別注意大小寫檢查
+
+我們現在的處理順序應該保持：
+
+```text
+STP hjud
+ ↓
+沒有小寫檢查問題？ ← 這裡其實有！
+```
+
+等等，這正是你這個測試暴露出的問題。
+
+`hjud` 是小寫字母，所以目前最前面的：
+
+```cpp
+for (const char c : input)
+{
+    if (c >= 'a' && c <= 'z')
+    {
+        return ... "Error: Command characters must be uppercase."
+    }
+}
+```
+
+會**在 Regex 之前直接攔截**。
+
+因此：
+
+```text
+STP hjud
+```
+
+無法得到 `Invalid parameters`。
+
+---
+
+## 這裡我建議先不要直接改
+
+因為你現在提出的是一個**共通規則衝突**：
+
+> 「所有命令與參數的英文字母都必須大寫」
+
+但同時：
+
+> `STP hjud` 應該回 `Invalid parameters`
+
+這代表我們必須先決定：
+
+### A. 大小寫規則優先
+
+```text
+STP hjud
+→ Error: Command characters must be uppercase.
+```
+
+### B. Command 名稱大小寫錯誤才回 uppercase error，參數中的小寫字母則視為 Invalid parameters
+
+```text
+STP hjud
+→ Invalid parameters
+```
+
+你現在明確希望的是 **B**。
+
+如果確定採用 B，那麼我們需要調整之前加入的「整個 input 掃描小寫」邏輯，不能再對所有 input 的 `a-z` 一律直接回 uppercase error。
+
+**我建議先確認這條共通規則後再修改，否則我們後面每個 Command 的參數都有可能遇到同樣問題。**
+
+---
+
+對，我完全同意你的方向。**這才是比較乾淨、可維護，而且符合目前 `COMMAND_RULES[]` 架構的做法。**
+
+你指出的兩個問題都成立：
+
+1. **Command 大小寫不應該另外寫一個全域 `a-z` 掃描。**
+2. **Parameter 是否合法，應該完全交給該 Command 對應的 Regex 判斷。**
+
+這樣後面新增 Command 時，不需要再增加額外的特殊判斷。
+
+---
+
+# 第一步：移除錯誤的全域小寫判斷
+
+檔案：
+
+```text
+~/Gmt_CMD_Parser/src/command_parser.cpp
+```
+
+Function：
+
+```cpp
+CommandParser::parse()
+```
+
+把我們之前加入的這整段刪除：
+
+```cpp
+for (const char c : input)
+{
+    if (c >= 'a' && c <= 'z')
+    {
+        return {
+            ParserResult::INVALID,
+            "",
+            "",
+            "Error: Command characters must be uppercase.\r\n"
+        };
+    }
+}
+```
+
+**這段不要再保留。**
+
+---
+
+# 第二步：Command 直接比對 `COMMAND_RULES[]`
+
+現在應該讓 Parser 直接利用：
+
+```cpp
+static const CommandRule COMMAND_RULES[]
+```
+
+來找 Command。
+
+例如輸入：
+
+```text
+STP
+```
+
+可以找到：
+
+```cpp
+{"STP", REGEX_NO_PARAMETER}
+```
+
+輸入：
+
+```text
+stp
+```
+
+找不到：
+
+```text
+"STP"
+```
+
+因為我們要求**完全相同**。
+
+因此自然得到：
+
+```text
+Unknown command
+```
+
+而不是另外寫：
+
+```cpp
+if (lowercase...)
+```
+
+這樣才乾淨。
+
+---
+
+# 第三步：Parameter 完全交給 Regex
+
+這一點你說得非常重要。
+
+例如：
+
+```text
+STP hjud
+```
+
+Parser 找到：
+
+```cpp
+{"STP", REGEX_NO_PARAMETER}
+```
+
+然後：
+
+```cpp
+REGEX_NO_PARAMETER
+```
+
+是：
+
+```cpp
+R"(^\s*$)"
+```
+
+所以 `hjud` 不符合。
+
+因此應該直接得到：
+
+```text
+Invalid parameters
+```
+
+這正好解決你剛才測試發現的問題。
+
+---
+
+# 第四步：我建議把 Parser 的錯誤分類固定下來
+
+流程應該變成：
+
+```text
+Input
+ ↓
+Command Rules 找 Command
+ ↓
+找不到
+ → Unknown command
+ ↓
+找到
+ ↓
+使用該 Command 的 Regex 檢查 parameter
+ ↓
+不符合
+ → Invalid parameters
+ ↓
+符合
+ → VALID
+```
+
+例如：
+
+| Input      | 結果                 |
+| ---------- | ------------------ |
+| `STP`      | VALID              |
+| `STP 123`  | Invalid parameters |
+| `STP hjud` | Invalid parameters |
+| `stp`      | Unknown command    |
+| `UNKNOWN`  | Unknown command    |
+
+這樣**大小寫規範自然由 Command Rule 完成，不需要額外的大小寫判斷程式。**
+
+---
+
+## 第五步：這也會自然處理參數中的大小寫
+
+例如某些 Command 的 Regex 明確要求：
+
+```cpp
+M[0-9]{2}
+```
+
+那麼：
+
+```text
+M01
+```
+
+符合。
+
+而：
+
+```text
+m01
+```
+
+不符合。
+
+因此直接：
+
+```text
+Invalid parameters
+```
+
+不需要額外寫：
+
+```cpp
+if (is_lowercase...)
+```
+
+這就是你說的「好好利用 array 與 regular expression」。
+
+---
+
+# 這次修改的核心
+
+我們不再有：
+
+```text
+❌ 全域掃描 a-z
+❌ 特別處理 lowercase
+❌ 為每個 Command 寫額外判斷
+```
+
+改成：
+
+```text
+COMMAND_RULES[]
+       ↓
+Command exact match
+       ↓
+Command 對應 Regex
+       ↓
+VALID / Invalid parameters
+```
+
+這個架構我認為應該正式確立下來，後面所有 Command 都依照這個方式處理。
+
+---
+
+### 你現在先做的修改
+
+只需要：
+
+**檔案**
+
+```text
+~/Gmt_CMD_Parser/src/command_parser.cpp
+```
+
+**Function**
+
+```text
+CommandParser::parse()
+```
+
+**刪除**
+
+整段全域 `a-z` 判斷。
+
+然後重新 compile/test。
+
+這一輪先測：
+
+```text
+STP
+STP hjud
+STP 123
+stp
+UNKNOWN
+```
+
+預期：
+
+```text
+STP          → VALID → >Done
+STP hjud     → Invalid parameters
+STP 123      → Invalid parameters
+stp          → Unknown command
+UNKNOWN      → Unknown command
+```
+
+**先不要改 `COMMAND_RULES[]` 本身。**
+
+如果這組測試通過，我們就把這個 Parser 行為正式確立，然後繼續檢查下一個 Command。
+
+---
+
+對，這樣定義更清楚。現在我們把錯誤分成：
+
+* **Command 本身不存在或大小寫/字元不完全符合 `COMMAND_RULES[]`** → `Invalid command format`
+* **Command 找到了，但參數不符合該 Command 的 Regex** → `Invalid parameters`
+* **Command + Parameters 都符合** → `VALID`
+
+例如：
+
+```text
+STP        → VALID
+Stp        → Invalid command format
+stp        → Invalid command format
+STPm       → Invalid command format
+UNKNOWN    → Invalid command format
+STP hjud   → Invalid parameters
+STP 123    → Invalid parameters
+```
+
+我建議錯誤字串使用：
+
+```text
+Invalid command format.\r\n
+```
+
+---
+
+## 修改位置
+
+檔案：
+
+```text
+~/Gmt_CMD_Parser/src/command_parser.cpp
+```
+
+Function：
+
+```text
+CommandParser::parse()
+```
+
+我們要修改的是**找不到 Command Rule 的那個分支**。
+
+目前如果你的程式是類似：
+
+```cpp
+return {
+    ParserResult::INVALID,
+    "",
+    "",
+    "Unknown command\r\n"
+};
+```
+
+改成：
+
+```cpp
+return {
+    ParserResult::INVALID,
+    "",
+    "",
+    "Invalid command format.\r\n"
+};
+```
+
+### 這裡不要新增任何大小寫判斷
+
+仍然維持我們剛才確立的架構：
+
+```text
+Input
+ ↓
+COMMAND_RULES[] 完全比對
+ ↓
+找不到
+ → Invalid command format.
+ ↓
+找到
+ ↓
+Regex
+ ↓
+不符合
+ → Invalid parameters.
+ ↓
+符合
+ → VALID
+```
+
+這樣：
+
+```text
+Stp
+```
+
+因為找不到完全相同的：
+
+```cpp
+{"STP", REGEX_NO_PARAMETER}
+```
+
+自然就是：
+
+```text
+Invalid command format.
+```
+
+而：
+
+```text
+STP hjud
+```
+
+仍然會找到 `STP`，再由：
+
+```cpp
+REGEX_NO_PARAMETER
+```
+
+判斷失敗，因此是：
+
+```text
+Invalid parameters.
+```
+
+---
+
+### 這一步只改一個字串
+
+**不要修改 `COMMAND_RULES[]`。**
+
+**不要增加新的判斷函式。**
+
+**不要修改 Regex。**
+
+修改完成後測試這幾個：
+
+```text
+STP
+Stp
+stp
+STPm
+UNKNOWN
+STP hjud
+STP 123
+```
+
+預期：
+
+```text
+STP       → >Done
+Stp       → Invalid command format.
+stp       → Invalid command format.
+STPm      → Invalid command format.
+UNKNOWN   → Invalid command format.
+STP hjud  → Invalid parameters.
+STP 123   → Invalid parameters.
+```
+
+這樣就符合我們現在確立的 Command Parser 三層邏輯。
+
+---
+
+不用再貼程式。我目前有 `COMMAND_RULES[]` 與 `parse()` 的上下文。
+
+你說得對，這種情況我應該直接給你**要修改的實際程式片段**，而不是只描述。
+
+### 修改位置
+
+檔案：
+
+```text
+~/Gmt_CMD_Parser/src/command_parser.cpp
+```
+
+Function：
+
+```cpp
+CommandParser::parse()
+```
+
+找到目前「找不到 Command Rule」的 `return`。
+
+如果目前是：
+
+```cpp
+return {
+    ParserResult::INVALID,
+    "",
+    "",
+    "Unknown command\r\n"
+};
+```
+
+**直接改成：**
+
+```cpp
+return {
+    ParserResult::INVALID,
+    "",
+    "",
+    "Invalid command format.\r\n"
+};
+```
+
+### 不需要修改其他程式
+
+這次只改這一個錯誤訊息。
+
+Parser 邏輯維持：
+
+```text
+Command 完全比對 COMMAND_RULES[]
+        │
+        ├── 找不到 → Invalid command format.
+        │
+        └── 找到
+              │
+              ▼
+         對應 Regex
+              │
+              ├── 不符合 → Invalid parameters.
+              │
+              └── 符合 → VALID
+```
+
+因此：
+
+```text
+Stp       → Invalid command format.
+stp       → Invalid command format.
+STPm      → Invalid command format.
+UNKNOWN   → Invalid command format.
+
+STP hjud  → Invalid parameters.
+STP 123   → Invalid parameters.
+STP       → VALID → >Done
+```
+
+先只做這個修改、compile/test。測試結果貼給我後，我們再繼續 STP 的確認或進入下一個 Command。
+
+---
+對，你把實際 `parse()` 貼出來後就很清楚了。這裡**不需要重新設計**，只要修改最後「找不到 Command Rule」的錯誤訊息即可。
+
+目前是：
+
+```cpp
+return {
+    ParserResult::INVALID,
+    command,
+    "",
+    "Unknown command"
+};
+```
+
+### 請修改成
+
+```cpp
+return {
+    ParserResult::INVALID,
+    command,
+    "",
+    "Invalid command format.\r\n"
+};
+```
+
+也就是完整位置如下：
+
+```cpp
+for (std::size_t i = 0; i < COMMAND_RULE_COUNT; ++i)
+{
+    const CommandRule& rule = COMMAND_RULES[i];
+
+    if (command != rule.command)
+    {
+        continue;
+    }
+
+    if (rule.parameterRegex == nullptr)
+    {
+        return {
+            ParserResult::INVALID,
+            command,
+            "",
+            "Parameter rule not implemented"
+        };
+    }
+
+    const std::regex regex(rule.parameterRegex);
+
+    if (!std::regex_match(parameters, regex))
+    {
+        return {
+            ParserResult::INVALID,
+            command,
+            "",
+            "Invalid parameters\r\n"
+        };
+    }
+
+    return {
+        ParserResult::VALID,
+        command,
+        input,
+        ""
+    };
+}
+
+return {
+    ParserResult::INVALID,
+    command,
+    "",
+    "Invalid command format.\r\n"
+};
+```
+
+### 這樣測試結果就是
+
+```text
+STP
+→ VALID
+→ >Done
+
+Stp
+→ Invalid command format.
+
+stp
+→ Invalid command format.
+
+STPm
+→ Invalid command format.
+
+UNKNOWN
+→ Invalid command format.
+
+STP hjud
+→ Invalid parameters
+
+STP 123
+→ Invalid parameters
+```
+
+**這次只修改最後的 `"Unknown command"`，其他程式完全不要動。**
+
+另外，我注意到目前：
+
+```cpp
+"Parameter rule not implemented"
+```
+
+和：
+
+```cpp
+"Empty command"
+```
+
+還沒有統一成我們現在的錯誤訊息規範。**這兩個先不要動**，等我們後面整理共通錯誤規範時再一起處理，避免現在一次改太多。
+---
+
+很好，SAH 這個命令目前的 Parser 規則**確實需要修改**。你目前的 `REGEX_SAH` 只接受固定 3 個 `Mxx`，與文件及你現在定義的規則不符。
+
+這次只修改 **SAH**，修改後先測試，成功再進下一個。
+
+### 第 1 步：修改 SAH Parser
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+**位置：** `REGEX_SAH` 定義附近。
+
+目前：
+
+```cpp
+constexpr const char* REGEX_SAH =
+    R"(^\s*(A|M[0-9]{2})(\s+(A|M[0-9]{2})){2}\s*$)";
+```
+
+這個規則有兩個問題：
+
+1. 只允許固定 3 個 Axis。
+2. 只允許 `M01` 這種兩位數，不接受 `M1`。
+
+請**只將這一行替換成：**
+
+```cpp
+constexpr const char* REGEX_SAH =
+    R"(^\s*(?:A|M(?:0?[1-9]|1[0-6])(?:\s+M(?:0?[1-9]|1[0-6]))*)\s*$)";
+```
+
+這樣規則就是：
+
+| 輸入                    | 結果      |
+| --------------------- | ------- |
+| `SAH A`               | VALID   |
+| `SAH M1`              | VALID   |
+| `SAH M01`             | VALID   |
+| `SAH M1 M2`           | VALID   |
+| `SAH M01 M02 M03`     | VALID   |
+| `SAH M1 M2 ... M16`   | VALID   |
+| `SAH M01 M02 ... M16` | VALID   |
+| `SAH A M01`           | INVALID |
+| `SAH M01 A`           | INVALID |
+| `SAH M17`             | INVALID |
+| `SAH M00`             | INVALID |
+| `SAH`                 | INVALID |
+
+也就是你要求的：
+
+* `A` 只能單獨存在。
+* Axis 可以 1～16 個。
+* `M1` 與 `M01` 都接受。
+* Axis 範圍限制為 `M1/M01` ～ `M16`。
+* Axis 之間必須有 Space/TAB。
+* 多個 Space/TAB 都可以。
+
+---
+
+### 第 2 步：修改 SAH Response Rule
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+**位置：** `RESPONSE_RULES[]`
+
+目前應該還沒有 SAH，所以新增一個 `ResponseRule`。
+
+建議放在 `STP` 後面：
+
+```cpp
+{
+    "SAH",
+    {
+        ">SAH\r\n",
+        ">SAH ERR <ErrorCode>\r\n",
+        ">homing end\r\n"
+    },
+    ">SAH\r\n"
+},
+```
+
+這裡我會**完全按照你這次定義**：
+
+* `>SAH`
+* `>SAH ERR <ErrorCode>`
+* `>homing end`
+
+而且 `>` 是實際 Response payload 的一部分。
+
+`<ErrorCode>` 目前尚未定義，所以模擬階段就保留文字：
+
+```text
+>SAH ERR <ErrorCode>
+```
+
+Default：
+
+```text
+>SAH
+```
+
+---
+
+### 第 3 步：先不要改其他東西
+
+這次不要修改：
+
+* `COMMAND_RULES[]`
+* `parse()`
+* `tcp_server`
+* Windows Client
+* 其他 Command
+* Response Parser
+
+只做上面兩個修改。
+
+完成後請先：
+
+```bash
+cd ~/Gmt_CMD_Parser
+cmake --build build
+```
+
+然後至少測試這幾組：
+
+```text
+SAH A
+SAH M1
+SAH M01
+SAH M1 M2
+SAH M01 M02 M03
+SAH M01 M02 M03 M04 M05 M06 M07 M08 M09 M10 M11 M12 M13 M14 M15 M16
+```
+
+以及錯誤：
+
+```text
+SAH
+SAH A M01
+SAH M01 A
+SAH M17
+SAH M00
+```
+
+另外從 Windows Client 測：
+
+```text
+SAH A
+```
+
+確認 CM5 回：
+
+```text
+>SAH
+```
+
+**先做到這裡。測試結果貼給我，我確認 SAH 完整通過後，再進下一個 Command。**
+---
+
+可以。SHC 目前的 Parser 規則**需要修改**，主要是你新增的「十進制/16 進制皆接受」以及 AxisName `M1`、`M01` 都接受。
+
+這次仍然只處理 **SHC**，先測試成功再往下。
+
+### 第 1 步：修改 SHC Regex
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+**位置：** `REGEX_SHC` 定義。
+
+目前：
+
+```cpp
+constexpr const char* REGEX_SHC =
+    R"(^\s*M[0-9]{2}\s+[+-]?[0-9]+\s+[+-]?[0-9]+\s+[+-]?[0-9]+\s+[+-]?[0-9]+(?:\.[0-9]+)?\s+[+-]?[0-9]+(?:\.[0-9]+)?\s+[+-]?[0-9]+\s*$)";
+```
+
+這不符合現在的規格，因為：
+
+* AxisName 不接受 `M1`
+* 數值目前只接受十進制
+* 現在 6 個數值參數都必須存在
+* 數值可以使用 Hex
+
+---
+
+### 第 2 步：加入 SHC 數值 Regex
+
+在 `REGEX_SHC` 附近新增：
+
+```cpp
+constexpr const char* REGEX_HEX_OR_INTEGER =
+    R"([+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+))";
+```
+
+然後將原本的 `REGEX_SHC` 替換成：
+
+```cpp
+constexpr const char* REGEX_SHC =
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s*$)";
+```
+
+這裡的規則是：
+
+```text
+SHC
+ │
+ ├─ AxisName       1 個
+ │   ├─ M1
+ │   ├─ M01
+ │   ├─ M2
+ │   ├─ M02
+ │   └─ ...
+ │       M16
+ │
+ ├─ SlaveIdx       必須存在
+ ├─ Group          必須存在
+ ├─ Method         必須存在
+ ├─ Speed          必須存在
+ ├─ Offset         必須存在
+ └─ AddrOffset     必須存在
+```
+
+每個數值接受：
+
+```text
+123
+-123
++123
+0x10
+0X10
+-0x10
++0x10
+ABC       ← 不接受
+```
+
+也就是目前按照你的要求，**Hex 以 `0x` / `0X` 開頭**。
+
+例如：
+
+```text
+SHC M01 2 17 400000 40000 0 128
+```
+
+以及：
+
+```text
+SHC M1 0x2 0x11 0x61A80 0x9C40 0x0 0x80
+```
+
+都應該 VALID。
+
+> 注意：目前 Parser 只負責確認「格式合法」，不在這一層判斷數值是否超出 EtherCAT 或硬體實際可接受範圍。
+
+---
+
+### 第 3 步：Response Rule
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+**位置：** `RESPONSE_RULES[]`
+
+新增：
+
+```cpp
+{
+    "SHC",
+    {
+        ">SHC\r\n",
+        ">Done\r\n",
+        ">SHC ERR [ErrorCode]\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+因此 SHC Response：
+
+```text
+>SHC
+>Done
+>SHC ERR [ErrorCode]
+```
+
+Default：
+
+```text
+>Done
+```
+
+這裡也維持你的原始定義，`>` 是實際 payload。
+
+---
+
+### 第 4 步：測試
+
+先編譯：
+
+```bash
+cd ~/Gmt_CMD_Parser
+cmake --build build
+```
+
+建議測試以下 VALID：
+
+```text
+SHC M01 2 17 400000 40000 0 128
+SHC M1 2 17 400000 40000 0 128
+SHC M16 2 17 400000 40000 0 128
+SHC M01 0x2 0x11 0x61A80 0x9C40 0x0 0x80
+SHC M1 -2 +17 400000 -40000 0 128
+```
+
+再測試 INVALID：
+
+```text
+SHC
+SHC M01 2 17 400000 40000 0
+SHC M01 2 17 400000 40000
+SHC M01 2 17 400000 40000 0 128 999
+SHC M17 2 17 400000 40000 0 128
+SHC M00 2 17 400000 40000 0 128
+SHC M01 ABC 17 400000 40000 0 128
+SHC M01 2 17 400000 40000 0 XYZ
+```
+
+最後從 Windows Client：
+
+```text
+SHC M01 2 17 400000 40000 0 128
+```
+
+應該收到：
+
+```text
+>Done
+```
+
+**先完成這一步並把測試結果貼給我。SHC 通過後，我們再處理下一個 Command。**
+---
+
+對，這個編譯錯誤是我上一個修改方式造成的。**問題不是你的 Regex 邏輯，而是 C++ 不允許這樣直接把 `constexpr const char*` 變數串接在另一個字串 literal 中。**
+
+我們只修這一點，不改 SHC 的規則。
+
+### 第 1 步：修正 `REGEX_SHC`
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+**位置：** `REGEX_HEX_OR_INTEGER` 與 `REGEX_SHC`。
+
+我上一個步驟叫你加入：
+
+```cpp
+constexpr const char* REGEX_HEX_OR_INTEGER =
+    R"([+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+))";
+```
+
+這個可以**保留**。
+
+但是下面這種寫法：
+
+```cpp
+constexpr const char* REGEX_SHC =
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s+)" REGEX_HEX_OR_INTEGER
+    R"(\s*$)";
+```
+
+請**整段刪除**。
+
+改成一條完整 Regex：
+
+```cpp
+constexpr const char* REGEX_SHC =
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s*$)";
+```
+
+### 第 2 步：`REGEX_HEX_OR_INTEGER` 可以刪除
+
+因為現在 `REGEX_SHC` 已經直接包含完整規則，所以：
+
+```cpp
+constexpr const char* REGEX_HEX_OR_INTEGER =
+    R"([+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+))";
+```
+
+也請**刪除**，避免留下沒有使用的定義。
+
+---
+
+### 第 3 步：先只重新編譯
+
+先不要做測試，也不要再改其他檔案。
+
+```bash
+cd ~/Gmt_CMD_Parser/build
+make -j$(nproc)
+```
+
+這次預期應該可以通過編譯。
+
+**請先只回報編譯結果。**
+
+如果編譯成功，我們下一步再測 SHC 的 `M1/M01 + 十進制/Hex + 缺參數`，不用重新貼程式。
+---
+
+對，你這個判斷是對的。**這筆測試本身應該是有效的**，所以目前 SHC Regex 還有問題。
+
+原因是我們剛才把「所有數值」寫成：
+
+```text
+[+-]?(0x...|十進制)
+```
+
+但你的規格說的是「數值不限」，而且 Hex 也接受；你這筆：
+
+```text
+SHC M1 -2 +17 400000 -40000 0 128
+```
+
+其中 `-2`、`+17`、`-40000` 都應該被接受。
+
+更重要的是，我們現在需要避免把 SHC 的數值規則限制得比文件更多。
+
+### 這一步只修 SHC
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+**位置：** `REGEX_SHC`
+
+目前的：
+
+```cpp
+constexpr const char* REGEX_SHC =
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s*$)";
+```
+
+請替換成：
+
+```cpp
+constexpr const char* REGEX_SHC =
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s*$)";
+```
+
+你會發現這兩段看起來一樣。**這代表真正問題不是這個 Regex。**
+
+所以先不要再修改程式。
+
+你這個輸入：
+
+```text
+SHC M1 -2 +17 400000 -40000 0 128
+```
+
+按照我們目前的 Regex，理論上應該 MATCH。
+
+因此現在最重要的是確認**你實際檔案中的 `REGEX_SHC` 到底是哪一版**，避免我再猜。
+
+請執行：
+
+```bash
+cd ~/Gmt_CMD_Parser
+grep -n -A2 "REGEX_SHC" src/command_parser.cpp
+```
+
+把輸出貼給我。
+
+**這一步先不要改任何程式。** 我看到你實際使用的 Regex 後，直接指出真正原因。
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 

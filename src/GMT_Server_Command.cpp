@@ -8,6 +8,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <cstdint>
+#include <cstring>
+#include <vector>
 
 namespace
 {
@@ -16,6 +18,67 @@ constexpr std::uint16_t SERVER_PORT = 9999;
 constexpr int BACKLOG = 1;
 
 } // namespace
+
+struct ResponseRule
+{
+    const char* command;
+    std::vector<const char*> responses;
+    const char* default_response;
+};
+
+static const ResponseRule RESPONSE_RULES[] =
+{
+    {
+        "INS",
+        {
+            ">Connected.\r\n",
+            ">Connecting...\r\n",
+            ">Connect fail.\r\n"
+        },
+        ">Connected.\r\n"
+    },
+    {
+        "STP",
+        {
+            ">STP\r\n",
+            ">Done\r\n"
+        },
+        ">Done\r\n"
+    },
+    {
+        "SAH",
+        {
+            ">SAH\r\n",
+            ">SAH ERR <ErrorCode>\r\n",
+            ">homing end\r\n"
+        },
+        ">SAH\r\n"
+    },
+    {
+        "SHC",
+        {
+            ">SHC\r\n",
+            ">Done\r\n",
+            ">SHC ERR [ErrorCode]\r\n"
+        },
+        ">Done\r\n"
+    },
+};
+
+
+static const char* GetDefaultResponse(const char* command)
+{
+    for (const auto& rule : RESPONSE_RULES)
+    {
+        if (std::strcmp(rule.command, command) == 0)
+        {
+            return rule.default_response;
+        }
+    }
+
+    return "DONE\r\n";
+}
+
 
 int main()
 {
@@ -122,23 +185,11 @@ int main()
 
         if (result.result == ParserResult::VALID)
         {
-            response = "VALID\r\n";
-
-            std::cout << "[Parser] VALID"
-                    << std::endl;
+            response = GetDefaultResponse(result.command.c_str());
         }
         else
         {
-            response = "INVALID\r\n";
-
-            std::cout << "[Parser] INVALID";
-
-            if (!result.error.empty())
-            {
-                std::cout << " - " << result.error;
-            }
-
-            std::cout << std::endl;
+            response = result.error.c_str();
         }
 
         const ssize_t sent = send(
