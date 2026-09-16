@@ -5319,6 +5319,2656 @@ grep -n -A2 "REGEX_SHC" src/command_parser.cpp
 **這一步先不要改任何程式。** 我看到你實際使用的 Regex 後，直接指出真正原因。
 ---
 
+---
+
+## ① `src/command_parser.cpp`
+
+### 目前位置
+
+在：
+
+```cpp
+constexpr const char* REGEX_SHC_QUERY =
+    R"(^\s*M[0-9]{2}\s*$)";
+```
+
+### 問題
+
+目前只接受兩位數：
+
+```text
+SHC? M01   → VALID
+SHC? M08   → VALID
+SHC? M1    → INVALID   ← 與文件不符
+```
+
+而你的文件要求：
+
+```text
+M1
+M01
+M8
+M08
+...
+M16
+```
+
+都應接受。
+
+同時：
+
+```text
+M0
+M00
+M17
+M18
+M99
+```
+
+都必須 INVALID。
+
+---
+
+### 最小修改
+
+把這一行：
+
+```cpp
+constexpr const char* REGEX_SHC_QUERY =
+    R"(^\s*M[0-9]{2}\s*$)";
+```
+
+修改成：
+
+```cpp
+constexpr const char* REGEX_SHC_QUERY =
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s*$)";
+```
+
+這和目前 `REGEX_SAH` 使用的 Axis 範圍邏輯一致。
+
+### 修改後預期
+
+```text
+SHC? M1       VALID
+SHC? M01      VALID
+SHC? M8       VALID
+SHC? M08      VALID
+SHC? M16      VALID
+SHC? M016     INVALID
+SHC? M0       INVALID
+SHC? M00      INVALID
+SHC? M17      INVALID
+SHC? M99      INVALID
+SHC? M01 M02  INVALID
+```
+
+這裡**不需要修改 `COMMAND_RULES[]`**，因為目前已經有：
+
+```cpp
+{"SHC?",  REGEX_SHC_QUERY},
+```
+
+所以只需要修正 Regex。
+
+---
+
+# ② `src/GMT_Server_Command.cpp`
+
+目前 `RESPONSE_RULES[]` 裡面沒有 `SHC?`。
+
+因此需要在 `SHC` Rule 後面新增一個 `SHC?` Rule。
+
+### 建議位置
+
+目前：
+
+```cpp
+    {
+        "SHC",
+        {
+            ">SHC\r\n",
+            ">Done\r\n",
+            ">SHC ERR [ErrorCode]\r\n"
+        },
+        ">Done\r\n"
+    },
+```
+
+後面直接加入：
+
+```cpp
+    {
+        "SHC?",
+        {
+            ">SHC? M01 1 2 17 400000.0 40000 0 5\r\n"
+        },
+        ">SHC? M01 1 2 17 400000.0 40000 0 5\r\n"
+    },
+```
+
+### 這裡有一個重要點
+
+你指定目前是**模擬版本**，所以我不會嘗試從 `result.payload`、AxisName 或其他地方組 Response。
+
+目前固定回覆：
+
+```text
+>SHC? M01 1 2 17 400000.0 40000 0 5
+```
+
+並且保留：
+
+```text
+>
+```
+
+以及：
+
+```text
+\r\n
+```
+
+這是目前的**模擬資料**，不是正式 Controller persistent settings 的讀取結果。
+
+你也可以在這個 Rule 上方加一個很短的註解，例如：
+
+```cpp
+// Simulation data for SHC? response.
+```
+
+這樣未來正式接 Controller 資料時，很容易找到這裡替換。
+
+---
+
+## ③ 這次沒有其他地方需要修改
+
+目前我確認：
+
+```text
+command_parser.cpp
+    REGEX_SHC_QUERY      ← 修改
+
+COMMAND_RULES[]
+    SHC?                 ← 不修改
+
+GMT_Server_Command.cpp
+    RESPONSE_RULES[]
+        SHC?             ← 新增
+
+GetDefaultResponse()
+    不修改
+
+parse()
+    不修改
+```
+
+---
+這次只處理 **`SVO`**。
+
+我對照目前的 `src/command_parser.cpp` 與你提供的規格後，結論是：
+
+## ① Parser：目前已經符合，不需要修改
+
+目前 `COMMAND_RULES[]` 已經是：
+
+```cpp
+{"SVO",   REGEX_NO_PARAMETER},
+```
+
+而：
+
+```cpp
+constexpr const char* REGEX_NO_PARAMETER =
+    R"(^\s*$)";
+```
+
+代表 `SVO` 後面只能是空白，不允許任何參數。
+
+因此：
+
+```text
+SVO        → VALID
+SVO␠       → VALID
+SVO␉       → VALID
+SVO  ␠     → VALID
+```
+
+以下都會 INVALID：
+
+```text
+SVO 1
+SVO 0
+SVO ABC
+SVO M01
+SVO 1 2
+```
+
+這完全符合：
+
+> 命令後面不接受參數。
+
+所以 **不要修改 `REGEX_NO_PARAMETER`，也不要修改 `COMMAND_RULES[]`。**
+
+---
+
+## ② Response Rule：目前缺少 `SVO`
+
+`src/GMT_Server_Command.cpp` 的 `RESPONSE_RULES[]` 目前只有：
+
+```text
+INS
+STP
+SAH
+SHC
+SHC?
+```
+
+所以需要新增 `SVO`。
+
+建議放在 `STP` 後面，保持 Command 順序清楚。
+
+加入：
+
+```cpp
+    {
+        "SVO",
+        {
+            ">SVO\r\n",
+            ">Done\r\n"
+        },
+        ">Done\r\n"
+    },
+```
+
+這符合你的規格：
+
+```text
+Response 1:
+>SVO
+
+Response 2:
+>Done.
+
+Default:
+>Done
+```
+
+不過這裡有一個**需要特別確認的文字差異**：
+
+你提供的文件寫的是：
+
+```text
+>Done.
+```
+
+有句點 `.`。
+
+而你最後明確說：
+
+> 預設為 `>Done`
+
+你目前前面 `STP` 的既有 Response 是：
+
+```cpp
+">Done\r\n"
+```
+
+所以按照你這次最後的明確指定，我建議 **Response 仍採你最後指定的 `>Done`，不自行加入句點**：
+
+```cpp
+    {
+        "SVO",
+        {
+            ">SVO\r\n",
+            ">Done\r\n"
+        },
+        ">Done\r\n"
+    },
+```
+
+這樣也與目前已驗證的 `STP` Response 格式一致。
+
+---
+
+## ③ 這次實際只需要修改一個地方
+
+```text
+src/command_parser.cpp
+    → 不修改
+
+src/GMT_Server_Command.cpp
+    → RESPONSE_RULES[]
+    → 新增 SVO
+```
+
+`parse()` 不修改。
+
+---
+
+### 請先修改並 Compile
+
+```bash
+cd ~/Gmt_CMD_Parser/build
+make -j$(nproc)
+```
+
+Compile PASS 後，我們再測 `SVO` 的 Valid / Invalid。
+
+這次至少要確認：
+
+```text
+SVO       → VALID
+SVO 1     → INVALID
+SVO ABC   → INVALID
+```
+
+以及 TCP Response：
+
+```text
+>SVO
+>Done
+```
+
+其中 Default 應該是：
+
+```text
+>Done
+```
+這次處理 **`SVF`**。
+
+### ① Parser：目前已符合，不需要修改
+
+目前 `src/command_parser.cpp` 已經有：
+
+```cpp
+{"SVF",   REGEX_NO_PARAMETER},
+```
+
+而 `REGEX_NO_PARAMETER`：
+
+```cpp
+R"(^\s*$)"
+```
+
+因此：
+
+```text
+SVF        → VALID
+SVF 1      → INVALID
+SVF ABC    → INVALID
+SVF M01    → INVALID
+```
+
+符合文件的：
+
+```text
+Format: SVF
+Arguments: None
+```
+
+**Parser 不修改。**
+
+### ② Response Rule
+
+目前 `src/GMT_Server_Command.cpp` 尚未有 `SVF`。
+
+文件列出的兩種 Response 是：
+
+```text
+>SVF
+>Done.
+```
+
+但依照你剛剛確認的規則，**不使用小數點**，所以實際 payload 應為：
+
+```text
+>SVF\r\n
+>Done\r\n
+```
+
+目前還缺少你要指定的 **Default Response**。
+
+所以這一步我先停在這裡，**不修改程式、不自行猜 Default**。
+
+請補上：
+
+```text
+Response 的 Default 為：？
+```
+
+我就接著告訴你 `RESPONSE_RULES[]` 的最小修改位置。
+
+---
+`CAL` 也是**無參數命令**，目前 Parser 已經符合需求，不需要修改。
+
+### 1. Command Parser
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+**目前 `COMMAND_RULES[]` 已有：**
+
+```cpp
+{"CAL",   REGEX_NO_PARAMETER},
+```
+
+而 `REGEX_NO_PARAMETER` 是：
+
+```cpp
+R"(^\s*$)"
+```
+
+所以 `CAL` 不接受任何參數，符合文件要求。
+
+**Parser：不用修改。**
+
+---
+
+### 2. Response Rule
+
+現在要修改：
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+**位置：** `RESPONSE_RULES[]`
+
+在 `SVF` 附近加入 `CAL`：
+
+```cpp
+{
+    "CAL",
+    {
+        ">CAL\r\n",
+        ">Done\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+這裡完全按照你的規則：
+
+* Response 1：`>CAL`
+* Response 2：`>Done`
+* Default：`>Done`
+* **沒有 `.`**
+* `\r\n` 是傳輸結尾，不是 response 內容的一部分
+
+---
+
+### 3. 這次測試
+
+修改後先編譯：
+
+```bash
+cd ~/Gmt_CMD_Parser/build
+make -j$(nproc)
+```
+
+然後測：
+
+**有效：**
+
+```text
+CAL
+```
+
+預期 Default Response：
+
+```text
+>Done
+```
+
+**無效：**
+
+```text
+CAL 1
+CAL ABC
+CAL M01
+```
+
+都應該被 Parser 判定為：
+
+```text
+Invalid parameters
+```
+---
+
+### 1. Command Parser
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+目前已經有：
+
+```cpp
+{"DSC",   REGEX_NO_PARAMETER},
+```
+
+符合 `Arguments: None`。
+
+**Parser：不需要修改。**
+
+---
+
+### 2. Response Rule
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+在 `RESPONSE_RULES[]` 加入：
+
+```cpp
+{
+    "DSC",
+    {
+        ">Disconnected.\r\n"
+    },
+    ">Disconnected.\r\n"
+},
+```
+
+這裡有一個地方需要特別注意：
+
+你寫的文件是：
+
+> `>Disconnected.`
+
+所以**這個命令的 Response 確實有句點 `.`**。
+
+因此實際傳送內容是：
+
+```text
+>Disconnected.\r\n
+```
+
+Default 也是：
+
+```text
+>Disconnected.\r\n
+```
+
+### 3. 測試
+
+有效：
+
+```text
+DSC
+```
+
+預期：
+
+```text
+>Disconnected.
+```
+
+無效：
+
+```text
+DSC 1
+DSC ABC
+DSC M01
+```
+
+應為：
+
+```text
+Invalid parameters
+```
+---
+
+### 1. Command Parser
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+目前已經有：
+
+```cpp
+{"VLS",   REGEX_VLS},
+```
+
+以及：
+
+```cpp
+constexpr const char* REGEX_VLS =
+    R"(^\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*$)";
+```
+
+這個規則符合目前文件需求：
+
+* `0.15` ✅
+* `0.3` ✅
+* `1`（整數）✅
+* `+0.15` / `-0.15` ✅
+* `.15` ✅
+* `0.` ✅
+* `ABC` ❌
+* `0.15ABC` ❌
+
+因此：
+
+**Parser 不需要修改。**
+
+---
+
+### 2. Response Rule
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+在 `RESPONSE_RULES[]` 加入：
+
+```cpp id="z1b6w8"
+{
+    "VLS",
+    {
+        ">VLS <value>\r\n",
+        ">Done\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+不過這裡要注意一點：目前我們的測試 Server 使用的是**固定 Default Response**，並不會把實際輸入的 `0.15` 動態帶進 `<value>`。
+
+所以：
+
+```text
+VLS 0.15
+```
+
+目前測試預期 Response 是：
+
+```text
+>Done
+```
+
+而不是：
+
+```text
+>VLS 0.15
+```
+
+這符合你指定的：
+
+> 預設 Response 為 `>Done`
+
+---
+
+### 3. 測試
+
+有效：
+
+```text
+VLS 0.15
+VLS 0.3
+VLS 1
+```
+
+應該都通過 Parser。
+
+無效：
+
+```text
+VLS ABC
+VLS 0.15ABC
+VLS 1.2.3
+VLS
+VLS 0.15 0.3
+```
+
+應判定為：
+
+```text
+Invalid parameters
+```
+
+**這次 Parser 不修改，只新增 `VLS` 的 Response Rule。**
+
+---
+
+### 1. Command Parser
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+目前已經有：
+
+```cpp id="n8xk7m"
+{"VLS?",  REGEX_NO_PARAMETER},
+```
+
+符合：
+
+* `VLS?` 不接受參數
+* `VLS? 1` ❌
+* `VLS? ABC` ❌
+
+**Parser：不需要修改。**
+
+---
+
+### 2. Response Rule
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+在 `RESPONSE_RULES[]` 加入：
+
+```cpp id="q4x8ks"
+{
+    "VLS?",
+    {
+        ">VLS? <value>\r\n"
+    },
+    ">VLS? <value>\r\n"
+},
+```
+
+這裡按照你的目前需求：
+
+* `<value>` 暫時保留為**模擬文字**
+* 尚未接實際 System Speed 數據
+* 只有一個 Response
+* 同時就是 Default Response
+* 未來接上實際數據時，再把 `<value>` 改成真正數值
+
+因此目前：
+
+```text
+VLS?
+```
+
+預期回傳：
+
+```text
+>VLS? <value>
+```
+
+**這次 Parser 不修改，只新增 `VLS?` Response Rule。**
+
+---
+
+這個 `MOV` 需要修改 **Parser**，因為目前的規則和你最新文件有幾個重要差異。
+
+### 1. Parser 修改
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+**目前：**
+
+```cpp
+constexpr const char* REGEX_MOV =
+    R"(^\s*R\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+(\.[0-9]+)?\s+[0-9]+(\.[0-9]+)?\s*$)";
+```
+
+這個規則目前只接受：
+
+* `R`
+* 六個數值
+* 而且數值限制太多
+
+與現在文件不符。
+
+#### 請直接替換 `REGEX_MOV`
+
+```cpp
+constexpr const char* REGEX_MOV =
+    R"(^\s*(?:R|L|PR|LP)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*$)";
+```
+
+這會接受：
+
+* `R` / `L` / `PR` / `LP` ✅
+* 大寫限定 ✅
+* 整數 ✅
+* 正數 ✅
+* 負數 ✅
+* 小數 ✅
+* `+1.5` / `-1.5` ✅
+* `.5` / `1.` 這類標準數值形式也接受 ✅
+* 中間 Space / TAB / 多個 Space 都接受 ✅
+* 必須**剛好六個數值** ✅
+
+例如：
+
+```text
+MOV R 2000 2000 1000 0 0.5 1
+MOV L -2000 100 50 -10.5 +20 0
+MOV PR 1 2 3 4 5 6
+MOV LP 1 2 3 4 5 6
+```
+
+都應該通過。
+
+---
+
+### 2. Response Rule
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+`MOV` 的 Response 全部先列入：
+
+```cpp
+{
+    "MOV",
+    {
+        ">MOV\r\n",
+        ">MOV ERR [error code]\r\n",
+        ">Excute Result : NORMAL FINISHED\r\n",
+        ">Excute Result : ERR STOP\r\n",
+        ">Excute Result : ERR NOT ON TARGET\r\n",
+        ">Excute Result : ERR\r\n",
+        ">Excute Result : ERR OVER GAP SENSOR THRSHOLD\r\n",
+        ">Done\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+我這裡**刻意保留文件中的原始文字**，包括：
+
+* `Excute` 拼字
+* `THRSHOLD` 拼字
+* `[error code]`
+
+因為目前我們是在建立 Command/Response 規格，不自行修正文案。
+
+Default：
+
+```text
+>Done
+```
+
+沒有句點。
+
+---
+
+### 3. 這次測試重點
+
+先編譯：
+
+```bash
+cd ~/Gmt_CMD_Parser/build
+make -j$(nproc)
+```
+
+有效測試：
+
+```text
+MOV R 2000 2000 1000 0 0.5 1
+MOV L -2000 -100 -50 -10.5 20.25 0
+MOV PR 1 2 3 4 5 6
+MOV LP 1 2 3 4 5 6
+```
+
+也測試 TAB / 多個空格。
+
+無效測試：
+
+```text
+MOV X 1 2 3 4 5 6
+MOV r 1 2 3 4 5 6
+MOV R 1 2 3 4 5
+MOV R 1 2 3 4 5 6 7
+MOV R 1 2 3 4 5 ABC
+MOV R 1 2 3 4 5 6 ABC
+MOV
+```
+
+其中 `MOV r ...` 必須失敗，因為你明確要求 **只允許大寫**。
+
+這次是 **Parser + Response Rule 都需要修改**。
+
+---
+
+這個 `MRV` 與 `MOV` 類似，但多了一個特殊格式 **`C` + 3 個數值**，因此 Parser 需要修改。
+
+### 1. Parser 修改
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+目前的 `REGEX_MRV` 和舊 `MOV` 規則一樣，只接受 `R`，不符合現在需求。
+
+請將目前的：
+
+```cpp
+constexpr const char* REGEX_MRV =
+    R"(^\s*R\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+(\.[0-9]+)?\s+[0-9]+(\.[0-9]+)?\s*$)";
+```
+
+替換成：
+
+```cpp
+constexpr const char* REGEX_MRV =
+    R"(^\s*(?:(?:R|L|RP|LP)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)|C\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))\s*$)";
+```
+
+這樣會嚴格符合你的規則：
+
+**R / L / RP / LP：**
+
+```text
+MRV R 1 2 3 4 5 6
+MRV L -1 2.5 3 4 5 6
+MRV RP 1 2 3 4 5 6
+MRV LP 1 2 3 4 5 6
+```
+
+必須剛好 **6 個數值**。
+
+**C：**
+
+```text
+MRV C 1 2 3
+```
+
+必須剛好 **3 個數值**。
+
+數值接受：
+
+* 整數
+* 正數
+* 負數
+* 浮點數
+* `+` / `-`
+* Space / TAB / 多個空白
+
+大小寫則嚴格限定：
+
+* `R` / `L` / `RP` / `LP` / `C` ✅
+* `r` / `l` / `rp` / `lp` / `c` ❌
+
+---
+
+### 2. Response Rule
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+在 `RESPONSE_RULES[]` 加入：
+
+```cpp
+{
+    "MRV",
+    {
+        ">MRV\r\n",
+        ">MRV ERR [error code]\r\n",
+        ">Excute Result : NORMAL FINISHED\r\n",
+        ">Excute Result : ERR STOP\r\n",
+        ">Excute Result : ERR NOT ON TARGET\r\n",
+        ">Excute Result : ERR\r\n",
+        ">Excute Result : ERR OVER GAP SENSOR THRESHOLD\r\n",
+        ">Done\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+這裡依照你提供的 `MRV` 文件保留：
+
+```text
+>Excute Result : ERR OVER GAP SENSOR THRESHOLD
+```
+
+和 `MOV` 的 `THRSHOLD` 不同；我不自行修改文件中的文字。
+
+Default：
+
+```text
+>Done
+```
+
+沒有句點。
+
+---
+
+### 3. 建議測試
+
+**6 數值格式：**
+
+```text
+MRV R 2000 2000 1000 0 0.5 1
+MRV L -2000 100 -50 -10.5 20.25 0
+MRV RP 1 2 3 4 5 6
+MRV LP 1 2 3 4 5 6
+```
+
+**C 格式：**
+
+```text
+MRV C 1 2 3
+MRV C -1.5 2 3.25
+```
+
+**應該失敗的：**
+
+```text
+MRV R 1 2 3 4 5
+MRV R 1 2 3 4 5 6 7
+MRV C 1 2
+MRV C 1 2 3 4
+MRV X 1 2 3 4 5 6
+MRV c 1 2 3
+```
+
+這次也是 **Parser + Response Rule 都修改**。
+
+---
+
+### 1. Parser 檢查
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+目前：
+
+```cpp
+constexpr const char* REGEX_MSV =
+    R"(^\s*M[0-9]{2}\s+[0-9]+\s*$)";
+```
+
+這個規則需要修改，因為目前不接受：
+
+* `M1`～`M9`
+* 負數
+* 浮點數
+* `+` 數值
+
+請將 `REGEX_MSV` 替換成：
+
+```cpp id="52641"
+constexpr const char* REGEX_MSV =
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*$)";
+```
+
+符合你的需求：
+
+* `M1` ～ `M16` ✅
+* `M01` ～ `M09`、`M10` ～ `M16` ✅
+* 只接受大寫 `M` ✅
+* 後面只能有 **1 個 position 數值** ✅
+* 整數 ✅
+* 正數 / 負數 ✅
+* 浮點數 ✅
+* Space / TAB / 多個空白 ✅
+
+例如：
+
+```text
+MSV M02 2000
+MSV M2 2000
+MSV M06 1
+MSV M16 -35.5
+MSV M01 +100.25
+```
+
+都應該通過。
+
+---
+
+### 2. Response Rule
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+加入：
+
+```cpp id="f0f8ee"
+{
+    "MSV",
+    {
+        ">MSV\r\n",
+        ">MSV ERR [error code]\r\n",
+        ">Excute Result : NORMAL FINISHED\r\n",
+        ">Excute Result : ERR STOP\r\n",
+        ">Excute Result : ERR NOT ON TARGET\r\n",
+        ">Excute Result : ERR\r\n",
+        ">Excute Result : ERR OVER GAP SENSOR THRESHOLD\r\n",
+        ">Done\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+Default：
+
+```text
+>Done
+```
+
+沒有句點。
+
+---
+
+### 3. 建議測試
+
+**有效：**
+
+```text
+MSV M02 2000
+MSV M2 2000
+MSV M06 1
+MSV M16 -35.5
+MSV M01 +100.25
+```
+
+**無效：**
+
+```text
+MSV M00 100
+MSV M17 100
+MSV M0 100
+MSV m02 100
+MSV M02
+MSV M02 100 200
+MSV M02 ABC
+MSV M02 1.2.3
+```
+
+這次同樣是 **Parser + Response Rule 都需要修改**。
+
+---
+
+### 1. Parser 檢查
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+目前 `MSR` 是：
+
+```cpp id="4v3t2m"
+constexpr const char* REGEX_MSR =
+    R"(^\s*M[0-9]{2}\s+[0-9]+\s*$)";
+```
+
+與剛才 `MSV` 的問題相同，因此需要修改。
+
+請將 `REGEX_MSR` 替換成：
+
+```cpp id="v3d8p1"
+constexpr const char* REGEX_MSR =
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*$)";
+```
+
+這樣 `<axis>` 與 `MSV` 完全相同：
+
+* `M1` ～ `M16` ✅
+* `M01` ～ `M09`、`M10` ～ `M16` ✅
+* 只接受大寫 `M` ✅
+
+`<delta>` 也與 `MSV` 的 `<position>` 相同：
+
+* 整數 ✅
+* 正數 / 負數 ✅
+* 浮點數 ✅
+* `+` / `-` ✅
+* 只能有 **一個數值** ✅
+* Space / TAB / 多個空白均可分隔 ✅
+
+例如：
+
+```text id="y7h8q2"
+MSR M02 2000
+MSR M2 -2000
+MSR M06 1
+MSR M16 -35.5
+```
+
+---
+
+### 2. Response Rule
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+加入：
+
+```cpp id="r5k2cx"
+{
+    "MSR",
+    {
+        ">MSR\r\n",
+        ">MSR ERR [error code]\r\n",
+        ">Excute Result : NORMAL FINISHED\r\n",
+        ">Excute Result : ERR STOP\r\n",
+        ">Excute Result : ERR NOT ON TARGET\r\n",
+        ">Excute Result : ERR\r\n",
+        ">Excute Result : ERR OVER GAP SENSOR THRESHOLD\r\n",
+        ">Done\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+Default：
+
+```text id="j6w4nz"
+>Done
+```
+
+沒有句點。
+
+---
+
+### 3. 測試
+
+有效：
+
+```text id="h2k8qs"
+MSR M02 2000
+MSR M2 -2000
+MSR M06 1
+MSR M16 -35.5
+```
+
+無效：
+
+```text id="x3p7mv"
+MSR M00 100
+MSR M17 100
+MSR m02 100
+MSR M02
+MSR M02 100 200
+MSR M02 ABC
+MSR M02 1.2.3
+```
+
+這次也是 **Parser + Response Rule 都需要修改**。
+
+---
+
+這個 `MPV` 確實需要先把規則拆清楚。它和前面的 `MOV / MRV / MSV` 不同，**不能只靠一條固定數量的 Regex**，因為 `Mn` 的數量是可變的，而且必須和後面的 `Pn` 數量完全相同。
+
+我建議維持目前 Parser 架構，只對 `MPV` 做一個最小的特殊數量檢查，不改整體 Parser 設計。
+
+### 1. `REGEX_MPV` 先修改
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+目前：
+
+```cpp
+constexpr const char* REGEX_MPV =
+    R"(^\s*M[0-9]{2}\s+M[0-9]{2}\s+[+-]?[0-9]+(\.[0-9]+)?\s+[+-]?[0-9]+(\.[0-9]+)?\s*$)";
+```
+
+這只允許：
+
+```text
+MPV M01 M03 1200.0 -35.5
+```
+
+固定兩個 Axis + 兩個 Position，不符合現在文件。
+
+請替換成：
+
+```cpp
+constexpr const char* REGEX_MPV =
+    R"(^\s*M(?:0?[1-9]|1[0-6])(?:\s+M(?:0?[1-9]|1[0-6]))*\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))*\s*$)";
+```
+
+這一步負責確認：
+
+* 前面一定是 `M1 ~ M16` / `M01 ~ M16`
+* 可以有一個或多個 `Mn`
+* `Mn` 必須全部出現在前面
+* 後面才開始出現數值
+* 數值接受整數、正負數、浮點數
+* Space / TAB / 多個空白都可以
+
+例如：
+
+```text
+MPV M01 100
+MPV M01 M03 1200.0 -35.5
+MPV M01 M03 M05 100 200 -50.5
+MPV M01 M02 M03 M04 1 2 3 4
+```
+
+語法上都會被接受。
+
+---
+
+### 2. 但是 Regex 還不能檢查「數量必須相等」
+
+這是這個命令最重要的地方。
+
+例如：
+
+```text
+MPV M01 M03 1200 -35.5
+```
+
+→ 2 個 Mn + 2 個 Pn ✅
+
+但：
+
+```text
+MPV M01 M03 1200
+```
+
+→ 2 個 Mn + 1 個 Pn ❌
+
+以及：
+
+```text
+MPV M01 M03 1200 -35.5 100
+```
+
+→ 2 個 Mn + 3 個 Pn ❌
+
+因此需要在 `parse()` 裡面，**只有 `MPV` 通過 Regex 後，再做 Mn/Pn 數量比對**。
+
+在：
+
+**`~/Gmt_CMD_Parser/src/command_parser.cpp`**
+
+找到：
+
+```cpp
+if (!std::regex_match(parameters, regex))
+{
+    return {
+        ParserResult::INVALID,
+        command,
+        "",
+        "Invalid parameters\r\n"
+    };
+}
+```
+
+在這個 `if` **之後、`return ParserResult::VALID` 之前**加入 MPV 專用數量檢查。
+
+核心邏輯是：
+
+```cpp
+if (command == "MPV")
+{
+    std::istringstream stream(parameters);
+    std::string token;
+
+    std::size_t axisCount = 0;
+    std::size_t valueCount = 0;
+    bool valueStarted = false;
+
+    while (stream >> token)
+    {
+        if (!valueStarted && token[0] == 'M')
+        {
+            ++axisCount;
+        }
+        else
+        {
+            valueStarted = true;
+            ++valueCount;
+        }
+    }
+
+    if (axisCount != valueCount)
+    {
+        return {
+            ParserResult::INVALID,
+            command,
+            "",
+            "Invalid parameters\r\n"
+        };
+    }
+}
+```
+
+這裡需要注意：因為使用 `std::istringstream`，檔案上方還需要確認有：
+
+```cpp
+#include <sstream>
+```
+
+如果目前沒有，就只新增這一個 include。
+
+---
+
+### 3. 最終 MPV 規則
+
+因此現在 `MPV` 會遵守：
+
+```text
+Mn Mn Mn ... Pn Pn Pn ...
+```
+
+也就是：
+
+> **先全部寫 Mn，再全部寫對應的 Pn。**
+
+例如：
+
+```text
+MPV M01 100
+```
+
+1 Mn → 1 Pn ✅
+
+```text
+MPV M01 M03 1200.0 -35.5
+```
+
+2 Mn → 2 Pn ✅
+
+```text
+MPV M01 M03 M05 100 200 -35.5
+```
+
+3 Mn → 3 Pn ✅
+
+而：
+
+```text
+MPV M01 M03 1200
+```
+
+2 → 1 ❌
+
+```text
+MPV M01 M03 1200 -35.5 100
+```
+
+2 → 3 ❌
+
+```text
+MPV M01 100 M03 200
+```
+
+❌，因為 `Mn` 沒有全部放在前面。
+
+---
+
+### 4. Response Rule
+
+**檔案：**
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+加入：
+
+```cpp
+{
+    "MPV",
+    {
+        ">MPV\r\n",
+        ">MPV ERR [ErrorCode]\r\n",
+        ">Excute Result : NORMAL FINISHED\r\n",
+        ">Excute Result : ERR STOP\r\n",
+        ">Excute Result : ERR NOT ON TARGET\r\n",
+        ">Excute Result : ERR\r\n",
+        ">Excute Result : ERR OVER GAP SENSOR THRESHOLD\r\n",
+        ">Done\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+Default：
+
+```text
+>Done
+```
+
+沒有句點。
+
+---
+
+### 5. 這次先測這幾組
+
+**有效：**
+
+```text
+MPV M01 100
+MPV M01 M03 1200.0 -35.5
+MPV M01 M03 M05 100 200 -35.5
+MPV M01 M02 M03 M04 1 2 3 4
+```
+
+**無效：**
+
+```text
+MPV M01 M03 1200
+MPV M01 M03 1200 -35.5 100
+MPV M01 100 M03 200
+MPV M00 100
+MPV M17 100
+MPV M01 ABC
+```
+
+其中最重要的是確認 **Mn/Pn 數量相等的檢查真的有效**。
+
+這個命令的修改比前幾個多一點，但沒有改變你的 Parser 架構；只是 `MPV` 在既有 Regex 驗證後增加一個**專屬的數量對應檢查**。
+
+對，你抓得對。**我上一版漏掉了這個格式。**
+
+你現在明確定義的 `MPV` 應該允許 **兩種格式**：
+
+### 格式 A：先全部 Mn，再全部 Pn
+
+```text
+MPV M01 100
+MPV M01 M02 100 200
+MPV M01 M02 M03 100 200 300
+```
+
+### 格式 B：Mn Pn 成對出現
+
+```text
+MPV M01 100 M02 200
+MPV M01 100 M02 200 M03 300
+```
+
+而且兩種格式都必須滿足：
+
+> **每一個 Mn 都必須有且只有一個對應 Pn。**
+
+所以我上一版的 Regex **不能直接使用**，因為它只允許「先全部 Mn、再全部 Pn」。
+
+---
+
+## 請修正 MPV
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+### 1. `REGEX_MPV` 改成同時接受兩種格式
+
+請將上一版的 `REGEX_MPV` 替換成：
+
+```cpp
+constexpr const char* REGEX_MPV =
+    R"(^\s*(?:(?:M(?:0?[1-9]|1[0-6])\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))(?:\s+M(?:0?[1-9]|1[0-6])\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))*|M(?:0?[1-9]|1[0-6])(?:\s+M(?:0?[1-9]|1[0-6]))*\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))*)\s*$)";
+```
+
+它現在允許：
+
+**格式 A：**
+
+```text
+MPV M01 M02 100 200
+```
+
+**格式 B：**
+
+```text
+MPV M01 100 M02 200
+```
+
+---
+
+### 2. 數量檢查也要改
+
+我上一版提供的 `istringstream` 邏輯是針對「Mn 全部在前面」設計的，因此**也不能直接保留**。
+
+對於：
+
+```text
+MPV M01 100 M02 200
+```
+
+必須判斷：
+
+```text
+M01 → 100
+M02 → 200
+```
+
+所以這裡應該改成：
+
+* 如果第一個 token 是 `M`
+
+  * 判斷是不是 `Mn Pn Mn Pn ...`
+  * 或 `Mn Mn ... Pn Pn ...`
+* 兩種形式都必須驗證 Mn 數量 = Pn 數量。
+
+**這部分我建議不要再硬塞一條很長的 Regex。**
+保持 Parser 現有架構，讓 Regex 負責「基本 token 格式」，再用少量 C++ 邏輯處理 MPV 的兩種排列方式會比較清楚，也比較不容易出錯。
+
+你先不要修改我上一版的 `istringstream` 區塊；**上一版 MPV 的修改先視為尚未完成**。
+
+我會以你現在確認的完整規則為準：
+
+> `MPV Mn Pn`
+> `MPV Mn Mn ... Pn Pn ...`
+> 兩種都合法，而且 Mn 與 Pn 必須一一對應。
+
+這個修正很重要，謝謝你抓出來。
+
+---
+對，問題已經找到了。**不是 `REGEX_MPV` 本身造成的，而是我上一版加入的數量檢查邏輯不支援「Mn Pn Mn Pn」格式。**
+
+例如：
+
+```text
+MPV M01 100 M02 200 M03 300
+```
+
+目前的計數方式看到第一個 `100` 後，就把後面的 `M02`、`M03` 也當成數值，所以最後會判定數量錯誤。
+
+我們只修正 **MPV 專用數量檢查**，其他 Parser 不動。
+
+---
+
+## 只修改這一段
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+找到之前加入的：
+
+```cpp
+if (command == "MPV")
+{
+    ...
+}
+```
+
+**整個 MPV 區塊替換成：**
+
+```cpp id="7k3m2p"
+if (command == "MPV")
+{
+    std::istringstream stream(parameters);
+    std::vector<std::string> tokens;
+    std::string token;
+
+    while (stream >> token)
+    {
+        tokens.push_back(token);
+    }
+
+    std::size_t axisCount = 0;
+    std::size_t valueCount = 0;
+
+    if (tokens.size() >= 2 &&
+        tokens[0][0] == 'M' &&
+        tokens[1][0] != 'M')
+    {
+        // Mn Pn Mn Pn ...
+        if ((tokens.size() % 2U) != 0U)
+        {
+            return {
+                ParserResult::INVALID,
+                command,
+                "",
+                "Invalid parameters\r\n"
+            };
+        }
+
+        axisCount = tokens.size() / 2U;
+        valueCount = tokens.size() / 2U;
+    }
+    else
+    {
+        // Mn Mn ... Pn Pn ...
+        std::size_t index = 0;
+
+        while (index < tokens.size() &&
+               tokens[index][0] == 'M')
+        {
+            ++axisCount;
+            ++index;
+        }
+
+        valueCount = tokens.size() - index;
+    }
+
+    if (axisCount == 0 || axisCount != valueCount)
+    {
+        return {
+            ParserResult::INVALID,
+            command,
+            "",
+            "Invalid parameters\r\n"
+        };
+    }
+}
+```
+
+另外確認檔案最上方已有：
+
+```cpp id="4n9x6k"
+#include <sstream>
+#include <vector>
+```
+
+如果已經有，就**不要重複加入**。
+
+---
+
+## 這樣兩種格式都會正確
+
+### 格式一：Mn Pn 成對
+
+```text
+MPV M01 100
+MPV M01 100 M02 200
+MPV M01 100 M02 200 M03 300
+```
+
+都會通過。✅
+
+### 格式二：先 Mn，再 Pn
+
+```text
+MPV M01 100
+MPV M01 M02 100 200
+MPV M01 M02 M03 100 200 300
+```
+
+也會通過。✅
+
+---
+
+### 必須失敗
+
+```text
+MPV M01 100 M02
+```
+
+1 個完整 pair + 多一個 Mn → ❌
+
+```text
+MPV M01 100 M02 200 M03
+```
+
+2 個完整 pair + 多一個 Mn → ❌
+
+```text
+MPV M01 M02 100
+```
+
+2 個 Mn + 1 個 Pn → ❌
+
+```text
+MPV M01 M02 100 200 300
+```
+
+2 個 Mn + 3 個 Pn → ❌
+
+```text
+MPV M01 100 M02 200 M03 300 M04
+```
+
+3 個完整 pair + 多一個 Mn → ❌
+
+---
+
+### 這次請先只測你剛才失敗的案例
+
+```text
+MPV M01 100 M02 200 M03 300
+```
+
+預期應該不再出現：
+
+```text
+Invalid parameters
+```
+
+而是通過 Parser，然後得到目前設定的 Default Response：
+
+```text
+>Done
+```
+
+先確認這一個即可。
+
+---
+
+可以，`MOV?` 很單純，Parser **目前已經符合，不需要修改**。
+
+### 1. Parser
+
+目前規則應該是：
+
+```cpp
+{"MOV?",   REGEX_NO_PARAMETER},
+```
+
+所以：
+
+```text
+MOV?        → VALID
+MOV? 123    → INVALID
+```
+
+**不用改。**
+
+### 2. Response Rule
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+在 `ResponseRule` 陣列加入：
+
+```cpp
+{
+    "MOV?",
+    {
+        ">MOV? <status>\r\n",
+        ">MOV? 1\r\n",
+        ">MOV? 0\r\n"
+    },
+    ">MOV? 1\r\n"
+},
+```
+
+Response 共 **3 種**：
+
+```text
+>MOV? <status>
+>MOV? 1
+>MOV? 0
+```
+
+預設：
+
+```text
+>MOV? 1
+```
+
+這裡 `<status>` 保留文件中的描述格式，`1` / `0` 則是實際狀態回應。
+
+**這次只需要新增 Response Rule，Parser 不用動。**
+
+---
+
+這個 `FRS` 有一個地方需要修改 Parser：**目前 `FRS` 的規則是 `nullptr`，所以現在還沒有參數驗證。**
+
+你的需求是：
+
+```text
+FRS FDR   → VALID
+FRS FSM   → VALID
+FRS FLM   → VALID
+FRS FDG   → VALID
+```
+
+其他名稱目前都：
+
+```text
+FRS ABC   → INVALID
+FRS MOV   → INVALID
+FRS       → INVALID
+```
+
+而且未來要能很容易增加新的 routine 名稱。
+
+### 1. Parser：建立 FRS 專用規則
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+**位置：**
+
+目前：
+
+```cpp
+constexpr const char* REGEX_DFRS =
+    R"(^\s*[A-Za-z0-9_]+\s*$)";
+```
+
+下面新增：
+
+```cpp id="k8n2q7"
+constexpr const char* REGEX_FRS =
+    R"(^\s*(?:FDR|FSM|FLM|FDG)\s*$)";
+```
+
+然後在 `COMMAND_RULES[]` 中，找到：
+
+```cpp
+{"FRS",   nullptr},
+```
+
+改成：
+
+```cpp id="f2r7km"
+{"FRS",   REGEX_FRS},
+```
+
+這樣目前只允許文件指定的 4 個 routine。
+
+**關於你說的「保留空位讓後續增加」：**
+這個寫法本身就很好擴充。未來增加例如 `FXX`，只需要把：
+
+```text
+(?:FDR|FSM|FLM|FDG)
+```
+
+改成：
+
+```text
+(?:FDR|FSM|FLM|FDG|FXX)
+```
+
+不需要改 Parser 架構。
+
+---
+
+### 2. Response Rule
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+加入：
+
+```cpp id="v7x3pn"
+{
+    "FRS",
+    {
+        ">FRS\r\n",
+        ">FRS ERR\r\n",
+        ">Excute Result : OVER ADC THRESHOLD\r\n",
+        ">Excute Result : NORMAL FINISHED MOVE TO REGION MAX\r\n",
+        ">Excute Result : UNDER BKN MOVE TO START POSITION\r\n",
+        ">Excute Result : ERR STOP\r\n",
+        ">Excute Result : ERR NOT ON TARGET\r\n",
+        ">Excute Result : ERR\r\n",
+        ">Excute Result : ERR OVER GAP SENSOR THRESHOLD\r\n",
+        ">Done\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+Response 共 **10 種**，全部依照文件保留。
+
+預設：
+
+```text
+>Done
+```
+
+### 這次修改總結
+
+只需要：
+
+1. 新增 `REGEX_FRS`
+2. `{"FRS", nullptr}` → `{"FRS", REGEX_FRS}`
+3. 新增 `FRS` Response Rule
+4. **不用修改 `parse()` 的特殊邏輯**
+
+這樣目前 FRS 就能限制為 `FDR / FSM / FLM / FDG`，未來新增 routine 時也只需擴充 regex。
+
+---
+
+這個 `DFRS` 需要修改 Parser，因為目前的 `REGEX_DFRS` 太寬鬆，沒有做到**長度 ≤ 32 字元**。
+
+你的規則是：
+
+* 只有 **英文大小寫 + 數字**
+* 長度 **1～32 字元**
+* 不允許空白、底線、特殊符號
+
+例如：
+
+```text
+DFRS ScanRoutine01       → VALID
+DFRS ABC123              → VALID
+DFRS A                   → VALID
+DFRS A12345678901234567890123456789012 → VALID（32）
+DFRS A123456789012345678901234567890123 → INVALID（33）
+DFRS Scan_Routine        → INVALID
+DFRS Scan-Routine        → INVALID
+DFRS                     → INVALID
+```
+
+### 1. 修改 Parser
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+找到目前：
+
+```cpp
+constexpr const char* REGEX_DFRS =
+    R"(^\s*[A-Za-z0-9_]+\s*$)";
+```
+
+替換成：
+
+```cpp id="v2j8kc"
+constexpr const char* REGEX_DFRS =
+    R"(^\s*[A-Za-z0-9]{1,32}\s*$)";
+```
+
+然後目前的：
+
+```cpp id="8s5v3n"
+{"DFRS",   REGEX_DFRS},
+```
+
+**不用修改。**
+
+---
+
+### 2. Response Rule
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+加入：
+
+```cpp id="9w6k2m"
+{
+    "DFRS",
+    {
+        ">DFRS\r\n",
+        ">Done\r\n",
+        ">DFRS ERR: Wrong Parameter.\r\n",
+        ">DFRS ERR: Check Controller Connecting Status.\r\n",
+        ">DFRS Cannot Find Routine Name.\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+共有 **5 種 Response**：
+
+```text id="g5l2rx"
+>DFRS
+>Done
+>DFRS ERR: Wrong Parameter.
+>DFRS ERR: Check Controller Connecting Status.
+>DFRS Cannot Find Routine Name.
+```
+
+預設：
+
+```text id="x1h8pj"
+>Done
+```
+
+這裡保留文件的 `ERR:`、句點與大小寫格式，不自行修改。
+
+**這次 Parser 只需修改 `REGEX_DFRS`，再新增 `DFRS` Response Rule。**
+
+---
+
+這個 `FDR` 的 Parser **需要新增規則**。目前 `COMMAND_RULES[]` 應該還是：
+
+```cpp
+{"FDR",   nullptr},
+```
+
+這次參數規則比較多，但可以一次把基本參數與 6 組 optional 都限制好。
+
+### 1. 新增 `REGEX_FDR`
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+**位置：**
+
+放在 `REGEX_DFRS`、`REGEX_FRS` 附近即可。
+
+新增：
+
+```cpp id="58321"
+constexpr const char* REGEX_FDR =
+    R"(^\s*[A-Za-z0-9]{1,32}\s+[RL]\s+[XYZ]\s+[XYZ]\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+V\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?(?:\s+TH\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?(?:\s+TT\s+[01])?(?:\s+ST\s+[012])?(?:\s+MP1\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?(?:\s+MP2\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?\s*$)";
+```
+
+這裡的規則是：
+
+```text
+name       → A-Z / a-z / 0-9，1~32 字元
+side       → R / L
+scanAxis   → X / Y / Z
+stepAxis   → X / Y / Z
+scanRange  → 數值
+stepRange  → 數值
+spacing    → 數值
+```
+
+Optional：
+
+```text
+V   數值
+TH  數值
+TT  0 / 1
+ST  0 / 1 / 2
+MP1 數值
+MP2 數值
+```
+
+每一個 optional 都可以不出現；出現時必須符合規則。
+
+然後找到：
+
+```cpp id="7c2a19"
+{"FDR",   nullptr},
+```
+
+改成：
+
+```cpp id="p3x8kd"
+{"FDR",   REGEX_FDR},
+```
+
+### 一個重要點
+
+按照你提供的 `Format`，我目前是按照文件列出的順序限制 optional：
+
+```text
+V → TH → TT → ST → MP1 → MP2
+```
+
+例如：
+
+```text
+FDR Scan01 R X Y 100 200 10 V 5 TH 20 TT 1 ST 0 MP1 50 MP2 80
+```
+
+合法。
+
+但：
+
+```text
+FDR Scan01 R X Y 100 200 10 TT 1 V 5
+```
+
+目前會判定 `INVALID`。
+
+如果你希望 **6 個 optional 可以任意順序排列、但每個最多出現一次**，這就不能單靠目前這條 regex 簡單處理，我們需要另外設計 parser 邏輯。依你目前提供的 Format，我先不自行改變規則。
+
+---
+
+### 2. Response Rule
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+加入：
+
+```cpp id="n6v2qp"
+{
+    "FDR",
+    {
+        ">FDR\r\n",
+        ">Done [TotalPoints]\r\n",
+        ">FDG ERR Wrong numbers of expecting parameters\r\n"
+    },
+    ">Done [TotalPoints]\r\n"
+},
+```
+
+Response 共 **3 種**：
+
+```text
+>FDR
+>Done [TotalPoints]
+>FDG ERR Wrong numbers of expecting parameters
+```
+
+預設：
+
+```text
+>Done [TotalPoints]
+```
+
+這裡我**刻意保留文件寫的 `>FDG ERR`**，沒有自行改成 `>FDR ERR`。
+
+---
+
+### 這次修改
+
+只需要兩個地方：
+
+1. `command_parser.cpp`
+
+   * 新增 `REGEX_FDR`
+   * `{"FDR", nullptr}` → `{"FDR", REGEX_FDR}`
+2. `GMT_Server_Command.cpp`
+
+   * 新增 FDR Response Rule
+
+**不需要新增 `parse()` 特殊邏輯。**
+
+你可以先編譯測試 `FDR`，尤其建議至少測：
+
+```text
+FDR Scan01 R X Y 100 200 10
+FDR Scan01 R X Y 100 200 10 V 5
+FDR Scan01 R X Y 100 200 10 V 5 TH 20 TT 1 ST 2 MP1 50 MP2 80
+FDR Scan01 L Z X -100.5 200 10
+FDR Scan01 R A Y 100 200 10
+FDR Scan01 R X Y 100 200
+FDR Scan01 R X Y 100 200 10 TT 2
+FDR Scan01 R X Y 100 200 10 ST 3
+```
+
+其中前 4 個應 `VALID`，後 4 個應 `INVALID`。
+
+
+---
+
+可以。依照你說的「**FSM 參數與 FDR 類似**」，我可以直接依文件規則整理，不需要你再指定每個細節。
+
+但有一點要注意：FSM 和 FDR 的基本參數不完全一樣。
+
+### 1. Parser 修改
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+新增：
+
+```cpp id="61473"
+constexpr const char* REGEX_FSM =
+    R"(^\s*[A-Za-z0-9]{1,32}\s+[RL]\s+[XYZ]\s+[XYZ]\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+TH\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?(?:\s+S\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?(?:\s+V\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?\s*$)";
+```
+
+規則：
+
+```text
+name       → 英文大小寫 + 數字，1～32 字元
+side       → R / L
+scanAxis   → X / Y / Z
+stepAxis   → X / Y / Z
+scanRange  → 數值
+stepRange  → 數值
+```
+
+Optional：
+
+```text
+TH → 數值
+S  → 數值
+V  → 數值
+```
+
+依文件 Format，目前按照：
+
+```text
+TH → S → V
+```
+
+的順序。
+
+然後找到：
+
+```cpp id="f8t3qx"
+{"FSM",   nullptr},
+```
+
+改成：
+
+```cpp id="x4j7ka"
+{"FSM",   REGEX_FSM},
+```
+
+---
+
+### 2. Response Rule
+
+**檔案：**
+
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+加入：
+
+```cpp id="f2r8wp"
+{
+    "FSM",
+    {
+        ">FSM\r\n",
+        ">Done [TotalPoints]\r\n",
+        ">FSM ERR Wrong parameters.\r\n"
+    },
+    ">Done [TotalPoints]\r\n"
+},
+```
+
+Response 共 **3 種**：
+
+```text
+>FSM
+>Done [TotalPoints]
+>FSM ERR Wrong parameters.
+```
+
+預設：
+
+```text
+>Done [TotalPoints]
+```
+
+### 這次修改
+
+只需要：
+
+1. 新增 `REGEX_FSM`
+2. `{"FSM", nullptr}` → `{"FSM", REGEX_FSM}`
+3. 新增 `FSM` Response Rule
+
+**不需要增加 `parse()` 特殊邏輯。**
+
+另外我先維持與 FDR 相同的設計：**optional 參數按照文件列出的順序出現**。若後面你的文件明確要求 `TH / S / V` 可以任意順序，我們再一起改成任意順序驗證。
+
+---
+
+對，這次 `WRD` 的文件規則很明確。你目前的 Regex 已經接近正確，但需要確認 **5 個參數各自的限制**。
+
+### 1. 修改 Parser Regex
+
+檔案：
+
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+找到目前的：
+
+```cpp
+constexpr const char* REGEX_WRD =
+    R"(^\s*[+-]?[0-9]+\s+[+-]?[0-9]+\s+[+-]?[0-9]+\s+(1|2|4)\s+[+-]?[0-9]+\s*$)";
+```
+
+這個 Regex 已經符合文件：
+
+1. `<slave id>` → decimal integer
+2. `<index>` → decimal integer
+3. `<subindex>` → decimal integer
+4. `<size>` → **只能 1、2、4**
+5. `<data>` → decimal integer
+
+所以這裡其實**不需要修改**。
+
+目前這個：
+
+```cpp
+(1|2|4)
+```
+
+已經精確限制 size。
+
+而且目前的 `[+-]?[0-9]+` 是十進位整數，不接受：
+
+```text
+0x1234
+1.5
+ABC
+```
+
+符合文件。
+
+---
+
+### 2. 確認 Command Rule
+
+同一檔案：
+
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+目前應該已有：
+
+```cpp
+{"WRD",   REGEX_WRD},
+```
+
+這個也**不用修改**。
+
+---
+
+### 3. Response：新增 WRD Response Rule
+
+檔案：
+
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+如果 `RESPONSE_RULES` 裡目前沒有 `WRD`，新增：
+
+```cpp
+{
+    "WRD",
+    {
+        ">Done\r\n",
+        ">WRD Error.\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+符合你的文件：
+
+* 成功：`>Done`
+* 失敗：`>WRD Error.`
+* **Default：`>Done`**
+
+---
+
+### 4. 建議這次只測這幾筆
+
+先測文件中的合法格式，例如：
+
+```text
+WRD 1 4096 0 1 100
+```
+
+預期：
+
+```text
+>Done
+```
+
+再確認 `size` 限制：
+
+```text
+WRD 1 4096 0 2 100
+WRD 1 4096 0 4 100
+```
+
+都應該 VALID。
+
+而：
+
+```text
+WRD 1 4096 0 3 100
+```
+
+應該：
+
+```text
+Invalid parameters
+```
+
+以及：
+
+```text
+WRD 1 4096 0 1 1.5
+```
+
+也應該：
+
+```text
+Invalid parameters
+```
+
+---
+
+對，`RRD` 直接按照文件規則即可。你目前的 Regex **已經完全符合**，不需要修改。
+
+### 1. Parser Regex：不用修改
+
+檔案：
+
+`~/Gmt_CMD_Parser/src/command_parser.cpp`
+
+目前：
+
+```cpp
+constexpr const char* REGEX_RRD =
+    R"(^\s*[+-]?[0-9]+\s+[+-]?[0-9]+\s+[+-]?[0-9]+\s+(1|2|4)\s*$)";
+```
+
+正好對應：
+
+1. `<slave id>` → decimal integer
+2. `<index>` → decimal integer
+3. `<subindex>` → decimal integer
+4. `<size>` → **只能 1、2、4**
+
+而且總共必須是 **4 個參數**。
+
+目前也已有：
+
+```cpp
+{"RRD",   REGEX_RRD}
+```
+
+所以 Parser **不用修改**。
+
+---
+
+### 2. Response：新增 RRD
+
+檔案：
+
+`~/Gmt_CMD_Parser/src/GMT_Server_Command.cpp`
+
+如果 `RESPONSE_RULES` 尚未有 `RRD`，新增：
+
+```cpp
+{
+    "RRD",
+    {
+        ">Done\r\n",
+        ">RRD Error.\r\n"
+    },
+    ">Done\r\n"
+},
+```
+
+符合：
+
+* 成功：`>Done`
+* 失敗：`>RRD Error.`
+* **Default：`>Done`**
+
+---
+
+### 3. 測試
+
+合法：
+
+```text
+RRD 1 4096 0 1
+RRD 1 4096 0 2
+RRD 1 4096 0 4
+```
+
+預期：
+
+```text
+>Done
+```
+
+錯誤 size：
+
+```text
+RRD 1 4096 0 3
+```
+
+預期：
+
+```text
+Invalid parameters
+```
+
+缺參數：
+
+```text
+RRD 1 4096 0
+```
+
+預期：
+
+```text
+Invalid parameters
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

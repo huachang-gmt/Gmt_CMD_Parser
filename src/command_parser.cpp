@@ -2,6 +2,8 @@
 
 #include <regex>
 #include <string>
+#include <sstream>
+#include <vector>
 
 namespace
 {
@@ -25,7 +27,7 @@ constexpr const char* REGEX_SHC =
     R"(^\s*M(?:0?[1-9]|1[0-6])\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s+[+-]?(?:0[xX][0-9A-Fa-f]+|[0-9]+)\s*$)";
 
 constexpr const char* REGEX_SHC_QUERY =
-    R"(^\s*M[0-9]{2}\s*$)";
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s*$)";
 
 constexpr const char* REGEX_VLS =
     R"(^\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*$)";
@@ -34,7 +36,7 @@ constexpr const char* REGEX_SPI =
     R"(^\s*[RL]\s+[UVW]\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*$)";
 
 constexpr const char* REGEX_ADC_QUERY =
-    R"(^\s*[+-]?[0-9]+\s*$)";
+    R"(^\s*(?:[+-]?[0-9]+)?\s*$)";
 
 constexpr const char* REGEX_SAC =
     R"(^\s*[+-]?[0-9]+\s*$)";
@@ -49,30 +51,40 @@ constexpr const char* REGEX_RRD =
     R"(^\s*[+-]?[0-9]+\s+[+-]?[0-9]+\s+[+-]?[0-9]+\s+(1|2|4)\s*$)";
 
 constexpr const char* REGEX_MOV =
-    R"(^\s*R\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+(\.[0-9]+)?\s+[0-9]+(\.[0-9]+)?\s*$)";
+    R"(^\s*(?:R|L|PR|LP)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+)[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*$)";
 
 constexpr const char* REGEX_MRV =
-    R"(^\s*R\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+(\.[0-9]+)?\s+[0-9]+(\.[0-9]+)?\s*$)";
+    R"(^\s*(?:(?:R|L|RP|LP)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)|C\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))\s*$)";
 
 constexpr const char* REGEX_MSV =
-    R"(^\s*M[0-9]{2}\s+[0-9]+\s*$)";
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*$)";
 
 constexpr const char* REGEX_MSR =
-    R"(^\s*M[0-9]{2}\s+[0-9]+\s*$)";
+    R"(^\s*M(?:0?[1-9]|1[0-6])\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*$)";
 
 constexpr const char* REGEX_MPV =
-    R"(^\s*M[0-9]{2}\s+M[0-9]{2}\s+[+-]?[0-9]+(\.[0-9]+)?\s+[+-]?[0-9]+(\.[0-9]+)?\s*$)";
+    R"(^\s*(?:(?:M(?:0?[1-9]|1[0-6])\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))(?:\s+M(?:0?[1-9]|1[0-6])\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))*|M(?:0?[1-9]|1[0-6])(?:\s+M(?:0?[1-9]|1[0-6]))*\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))*)\s*$)";
 
 constexpr const char* REGEX_MPR =
-    R"(^\s*M[0-9]{2}\s+M[0-9]{2}\s+[+-]?[0-9]+(\.[0-9]+)?\s+[+-]?[0-9]+(\.[0-9]+)?\s*$)";
+    R"(^\s*(?:(?:M(?:0?[1-9]|1[0-6])\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))(?:\s+M(?:0?[1-9]|1[0-6])\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))*|M(?:0?[1-9]|1[0-6])(?:\s+M(?:0?[1-9]|1[0-6]))*\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))*)\s*$)";
 
 constexpr const char* REGEX_DFRS =
-    R"(^\s*[A-Za-z0-9_]+\s*$)";
+    R"(^\s*[A-Za-z0-9]{1,32}\s*$)";
+
+constexpr const char* REGEX_FDR =
+    R"(^\s*[A-Za-z0-9]{1,32}\s+[RL]\s+[XYZ]\s+[XYZ]\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+V\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?(?:\s+TH\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?(?:\s+TT\s+[01])?(?:\s+ST\s+[012])?(?:\s+MP1\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?(?:\s+MP2\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?\s*$)";
+
+constexpr const char* REGEX_FSM =
+    R"(^\s*[A-Za-z0-9]{1,32}\s+[RL]\s+[XYZ]\s+[XYZ]\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:\s+TH\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?(?:\s+S\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?(?:\s+V\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))?\s*$)";
+
+constexpr const char* REGEX_FRS =
+    R"(^\s*(?:FDR|FSM|FLM|FDG)\s*$)";
 
 constexpr const char* REGEX_FLM =
-    R"(^\s*M[0-9]{2}\s+[0-9]+(\.[0-9]+)?\s+V\s+[0-9]+(\.[0-9]+)?(\s+TH\s+[0-9]+)?\s*$)";
+    R"(^\s*M[0-9]+\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+V\s+[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s+TH\s+[+-]?[0-9]+\s*$)";
 
-
+constexpr const char* REGEX_FDG =
+    R"(^\s*[A-Za-z0-9]{1,32}\s+[RL]\s+[XYZ]\s+[XYZ](?:\s+TH\s+[+-]?[0-9]+)?\s*$)";
 
 struct CommandRule
 {
@@ -105,14 +117,14 @@ static const CommandRule COMMAND_RULES[] =
     {"PMS?",  REGEX_NO_PARAMETER},
     {"SPI",   REGEX_SPI},
     {"SPI?",  REGEX_NO_PARAMETER},
-    {"FRS",   nullptr},
+    {"FRS",   REGEX_FRS},
     {"FRS?",  REGEX_NO_PARAMETER},
     {"DFRS",  REGEX_DFRS},
-    {"FDR",   nullptr},
-    {"FSM",   nullptr},
+    {"FDR",   REGEX_FDR},
+    {"FSM",   REGEX_FSM},
     {"FLM",   REGEX_FLM},
-    {"FDG",   nullptr},
-    {"ADC?",  nullptr},
+    {"FDG",   REGEX_FDG},
+    {"ADC?",  REGEX_ADC_QUERY},
     {"SAC",   REGEX_SAC},
     {"BKN",   REGEX_BKN},
     {"BKN?",  REGEX_NO_PARAMETER},
@@ -196,6 +208,64 @@ ParseResult CommandParser::parse(const std::string& input) const
                 "",
                 "Invalid parameters\r\n"
             };
+        }
+
+        if (command == "MPV" || command == "MPR")
+        {
+            std::istringstream stream(parameters);
+            std::vector<std::string> tokens;
+            std::string token;
+
+            while (stream >> token)
+            {
+                tokens.push_back(token);
+            }
+
+            std::size_t axisCount = 0;
+            std::size_t valueCount = 0;
+
+            if (tokens.size() >= 2 &&
+                tokens[0][0] == 'M' &&
+                tokens[1][0] != 'M')
+            {
+                // Mn Pn Mn Pn ...
+                if ((tokens.size() % 2U) != 0U)
+                {
+                    return {
+                        ParserResult::INVALID,
+                        command,
+                        "",
+                        "Invalid parameters\r\n"
+                    };
+                }
+
+                axisCount = tokens.size() / 2U;
+                valueCount = tokens.size() / 2U;
+            }
+            else
+            {
+                // Mn Mn ... Pn Pn ...
+                std::size_t index = 0;
+
+                while (index < tokens.size() &&
+                    tokens[index][0] == 'M')
+                {
+                    ++axisCount;
+                    ++index;
+                }
+
+                valueCount = tokens.size() - index;
+            }
+
+            if (axisCount == 0 || axisCount != valueCount)
+            {
+                return {
+                    ParserResult::INVALID,
+                    command,
+                    "",
+                    "Invalid parameters\r\n"
+                };
+            }
         }
 
         return {
